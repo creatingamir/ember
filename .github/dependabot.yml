@@ -1,0 +1,16 @@
+# Weekly update PRs for Rust dependencies and pinned GitHub Actions.
+# The cooldown skips versions younger than 7 days, so a malicious or broken release has time to be caught.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
