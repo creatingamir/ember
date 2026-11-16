@@ -1,9 +1,9 @@
 name: CI
 
+# Runs on every branch push, so CI is green before a PR is opened. Status checks attach to the
+# commit, so they also show on the PR. Pull requests from forks are not covered yet (needed by M8.4).
 on:
-  pull_request:
   push:
-    branches: [main]
 
 # The workflow token can only read the repository.
 permissions:
