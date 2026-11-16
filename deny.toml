@@ -1,0 +1,27 @@
+# cargo-deny: checks dependencies for security advisories, licenses and sources.
+# Reference: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+targets = ["aarch64-apple-darwin"]
+
+[advisories]
+# Any dependency with a known vulnerability or that is unmaintained fails CI.
+ignore = []
+
+[licenses]
+# Permissive licenses only. Extend this list deliberately, with the owner's approval.
+allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
+confidence-threshold = 0.9
+
+[licenses.private]
+# Our own crates are unpublished and have no license yet (see M8.4).
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
