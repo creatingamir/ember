@@ -8,5 +8,13 @@ publish.workspace = true
 [dependencies]
 clap.workspace = true
 
+[dev-dependencies]
+golden = { path = "../golden", version = "0.1.0" }
+libtest-mimic.workspace = true
+
+[[test]]
+name = "golden"
+harness = false
+
 [lints]
 workspace = true
