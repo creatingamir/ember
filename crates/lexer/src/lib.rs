@@ -161,7 +161,7 @@ pub enum TokenKind {
 
 impl TokenKind {
     /// Returns the source spelling of a fixed token, or `None` for names, literals and markers.
-    fn spelling(&self) -> Option<&'static str> {
+    pub fn spelling(&self) -> Option<&'static str> {
         match self {
             TokenKind::KwFn => Some("fn"),
             TokenKind::KwStruct => Some("struct"),
