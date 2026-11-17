@@ -67,16 +67,16 @@ fn main_with_return_type_is_rejected_at_its_name() {
     );
 }
 
-/// The ninth parameter is the one that is reported.
+/// Nine parameters, one more than fit in registers, are accepted.
 #[test]
-fn nine_parameters_are_reported_at_the_ninth_name() {
+fn nine_parameters_are_accepted() {
     let src = "\
 fn helper(p1: i64, p2: i64, p3: i64, p4: i64, p5: i64, p6: i64, p7: i64, p8: i64, p9: i64) {
 }
 fn main() {
 }
 ";
-    assert_single_error(src, "functions can take at most 8 parameters yet", "p9", 0);
+    checked(src);
 }
 
 /// Eight parameters, the register limit, are accepted.
@@ -539,16 +539,16 @@ fn clashing_local_is_not_added_again() {
     assert_single_error(&main_with(body), "`count` is already declared", "count", 2);
 }
 
-/// Only the ninth parameter is reported, not the ones after it.
+/// Ten parameters are accepted.
 #[test]
-fn tenth_parameter_is_not_reported_again() {
+fn ten_parameters_are_accepted() {
     let src = "\
 fn helper(p1: i64, p2: i64, p3: i64, p4: i64, p5: i64, p6: i64, p7: i64, p8: i64, p9: i64, p10: i64) {
 }
 fn main() {
 }
 ";
-    assert_single_error(src, "functions can take at most 8 parameters yet", "p9", 0);
+    checked(src);
 }
 
 /// Assigning to `_` is an error at the target, not an undefined name.

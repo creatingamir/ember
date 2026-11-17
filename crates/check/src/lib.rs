@@ -9,9 +9,6 @@ use ast::{
 };
 use source::{Diagnostic, Span};
 
-/// The most parameters a function may have; they travel in registers `x0` to `x7`.
-const MAX_PARAMS: usize = 8;
-
 /// The name of the built-in print function.
 const PRINT: &str = "print";
 
@@ -266,16 +263,10 @@ impl Checker {
         signatures
     }
 
-    /// Resolves the types of a function header and limits its parameters.
+    /// Resolves the types of a function header.
     fn resolve_signature(&mut self, function: &Function) -> FnSig {
         let mut params = Vec::new();
-        for (index, param) in function.params.iter().enumerate() {
-            if index == MAX_PARAMS {
-                self.error(
-                    "functions can take at most 8 parameters yet",
-                    param.name.span,
-                );
-            }
+        for param in &function.params {
             params.push(self.resolve_type(&param.ty));
         }
 

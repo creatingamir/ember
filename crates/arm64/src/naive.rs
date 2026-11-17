@@ -123,6 +123,7 @@ fn scratch(index: usize) -> Reg {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use source::Span;
 
     /// A virtual register.
     fn v(number: u32) -> Reg {
@@ -192,6 +193,8 @@ mod tests {
             name: "f".to_string(),
             slot_count: 0,
             vreg_count: 4,
+            span: Span::new(0, 0),
+            out_args: 0,
             next_label: 0,
             insts,
             frame_size: 0,

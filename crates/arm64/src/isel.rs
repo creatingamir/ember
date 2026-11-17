@@ -7,7 +7,7 @@ use crate::mir::{Cond, MFunction, MInst, Mem, Reg, VReg, internal_error};
 use crate::runtime;
 use crate::strings;
 
-/// How many arguments and parameters travel in registers (`x0` to `x7`).
+/// How many arguments and parameters travel in registers (`x0` to `x7`); the rest go on the stack.
 const MAX_REGISTER_ARGS: usize = 8;
 
 /// Selects MIR for `function`, or reports the first impossible case found.
@@ -18,6 +18,8 @@ pub fn select(function: &Function) -> Result<MFunction, Diagnostic> {
         name: function.name.clone(),
         slot_count: function.slots.len() as u32,
         vreg_count: selector.next_vreg,
+        span: function.span,
+        out_args: selector.out_args,
         next_label: selector.next_label,
         insts: selector.insts,
         frame_size: 0,
@@ -61,6 +63,8 @@ struct Selector<'a> {
     insts: Vec<MInst>,
     /// The number of the next virtual register to hand out; starts after the IR temps.
     next_vreg: u32,
+    /// The most stack arguments of any call so far.
+    out_args: u32,
     /// Numbers the local labels (`ok` and `panic`) of this function.
     next_label: u32,
     /// The panic paths still to be written after the body.
@@ -74,6 +78,7 @@ impl<'a> Selector<'a> {
             function,
             insts: Vec::new(),
             next_vreg: count_temps(function),
+            out_args: 0,
             next_label: 0,
             panics: Vec::new(),
         }
@@ -83,14 +88,22 @@ impl<'a> Selector<'a> {
     fn select_function(&mut self) -> Result<(), Diagnostic> {
         self.insts.push(MInst::Prologue);
         for (index, slot) in self.function.params.iter().enumerate() {
-            if index >= MAX_REGISTER_ARGS {
-                return Err(internal_error("a function has more than 8 parameters"));
-            }
             let mem = self.slot(*slot)?;
-            self.insts.push(MInst::Store {
-                src: Reg::phys(index as u8),
-                mem,
-            });
+            if index < MAX_REGISTER_ARGS {
+                self.insts.push(MInst::Store {
+                    src: Reg::phys(index as u8),
+                    mem,
+                });
+            } else {
+                // A stack parameter is copied into its slot through a new virtual register.
+                let copy = self.new_vreg()?;
+                let stack_index = (index - MAX_REGISTER_ARGS) as u32;
+                self.insts.push(MInst::Load {
+                    dst: copy,
+                    mem: Mem::InArg(stack_index),
+                });
+                self.insts.push(MInst::Store { src: copy, mem });
+            }
         }
         let function = self.function;
         for block in &function.blocks {
@@ -311,10 +324,16 @@ impl<'a> Selector<'a> {
         func: &str,
         args: &[Temp],
     ) -> Result<(), Diagnostic> {
-        if args.len() > MAX_REGISTER_ARGS {
-            return Err(internal_error("a call has more than 8 arguments"));
+        // The stack arguments go first, so that `x0` to `x7` are set last and nothing can clobber them.
+        let stack_args = args.len().saturating_sub(MAX_REGISTER_ARGS) as u32;
+        self.out_args = self.out_args.max(stack_args);
+        for (index, arg) in args.iter().enumerate().skip(MAX_REGISTER_ARGS) {
+            self.insts.push(MInst::Store {
+                src: virt(*arg),
+                mem: Mem::OutArg((index - MAX_REGISTER_ARGS) as u32),
+            });
         }
-        for (index, arg) in args.iter().enumerate() {
+        for (index, arg) in args.iter().enumerate().take(MAX_REGISTER_ARGS) {
             self.insts.push(MInst::Mov {
                 dst: Reg::phys(index as u8),
                 src: virt(*arg),
@@ -322,7 +341,7 @@ impl<'a> Selector<'a> {
         }
         self.insts.push(MInst::Bl {
             symbol: format!("_em_{func}"),
-            args: args.len() as u8,
+            args: args.len().min(MAX_REGISTER_ARGS) as u8,
         });
         if let Some(dst) = dst {
             self.insts.push(MInst::Mov {

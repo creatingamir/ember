@@ -142,6 +142,7 @@ fn rewrite_far_branches(function: &mut MFunction, far: &[bool]) -> Result<(), Di
 mod tests {
     use super::*;
     use crate::mir::{Cond, Reg};
+    use source::Span;
 
     /// A function around `insts` with 10 labels already used by isel.
     fn function_of(insts: Vec<MInst>) -> MFunction {
@@ -149,6 +150,8 @@ mod tests {
             name: "f".to_string(),
             slot_count: 0,
             vreg_count: 0,
+            span: Span::new(0, 0),
+            out_args: 0,
             next_label: 10,
             insts,
             frame_size: 0,

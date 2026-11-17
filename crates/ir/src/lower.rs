@@ -165,6 +165,7 @@ impl<'a> FunctionLowering<'a> {
                 returns_value,
                 slots: self.slots,
                 blocks,
+                span: function.name.span,
             }),
         }
     }

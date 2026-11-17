@@ -270,13 +270,14 @@ fn small_frame_uses_an_immediate_subtraction() {
     assert_lacks(&text, "sub sp, sp, x16");
 }
 
-/// A frame above 4095 bytes is reserved through `x16`.
+/// A frame above 4095 bytes is probed with `___chkstk_darwin`, with its size kept in `x9`.
 #[test]
-fn large_frame_is_built_in_x16() {
+fn large_frame_is_probed_and_built_in_x9() {
     let mut body: Vec<String> = (0..600).map(|i| format!("v{i} := {i}")).collect();
     body.extend((0..600).map(|i| format!("print(v{i})")));
     let text = asm(&main_with(&body));
-    assert_contains(&text, "sub sp, sp, x16");
+    assert_run(&text, &["bl ___chkstk_darwin", "sub sp, sp, x9"]);
+    assert_lacks(&text, "sub sp, sp, x16");
 }
 
 /// A small constant needs one `movz` and no `movk`.
@@ -389,6 +390,7 @@ fn module_of(insts: Vec<Inst>, term: Terminator) -> Module {
                 insts,
                 term,
             }],
+            span: Span::new(0, 0),
         }],
     }
 }
@@ -427,34 +429,107 @@ fn assert_internal_error(module: &Module) {
     assert_eq!(error.span, Span::new(0, 0));
 }
 
-/// A call with nine arguments is an internal error: arguments travel in `x0` to `x7`.
-#[test]
-fn call_with_nine_arguments_is_an_internal_error() {
-    let mut insts: Vec<Inst> = (0..9)
-        .map(|n| Inst::Const {
-            dst: Temp(n),
-            value: i64::from(n),
-        })
-        .collect();
+/// A module whose `main` calls itself with `count` constant arguments (temp `n` holds the value `n`).
+fn call_with_constants(count: u32) -> Module {
+    let mut insts: Vec<Inst> = (0..count).map(|n| constant(n, i64::from(n))).collect();
     insts.push(Inst::Call {
         dst: None,
         func: "main".to_string(),
-        args: (0..9).map(Temp).collect(),
+        args: (0..count).map(Temp).collect(),
     });
-    assert_internal_error(&module_of(insts, Terminator::Return(None)));
+    module_of(insts, Terminator::Return(None))
 }
 
-/// A function with nine parameters is an internal error.
-#[test]
-fn function_with_nine_parameters_is_an_internal_error() {
+/// A module whose `main` has `count` parameters named `p0`, `p1`, … and no body.
+fn module_with_parameters(count: u32) -> Module {
     let mut module = module_of(vec![], Terminator::Return(None));
-    module.functions[0].params = (0..9).map(SlotId).collect();
-    module.functions[0].slots = (0..9)
+    module.functions[0].params = (0..count).map(SlotId).collect();
+    module.functions[0].slots = (0..count)
         .map(|n| ir::Slot {
             name: format!("p{n}"),
         })
         .collect();
-    assert_internal_error(&module);
+    module
+}
+
+/// A module whose `main` has `count` unused slots and returns at once.
+fn module_with_slots(count: u32) -> Module {
+    let mut module = module_of(vec![], Terminator::Return(None));
+    module.functions[0].slots = (0..count)
+        .map(|n| ir::Slot {
+            name: format!("s{n}"),
+        })
+        .collect();
+    module
+}
+
+/// The ninth argument of a call is stored on the stack, before the register arguments are loaded.
+#[test]
+fn call_with_nine_arguments_stores_the_ninth_on_the_stack() {
+    let text = emit_ok(&call_with_constants(9), FILE);
+    assert_lacks(&text, "internal compiler error");
+    // The outgoing area is 16 bytes, so cell `c` is at `16 + 8c`: temp 8 is at 80, temp 0 at 16.
+    assert_run(
+        &text,
+        &["ldr x8, [sp, #80]", "str x8, [sp, #0]", "ldr x0, [sp, #16]"],
+    );
+}
+
+/// The ninth parameter is loaded from `[x29, #16]`, above the saved frame pointer and link register.
+#[test]
+fn ninth_parameter_is_read_above_the_frame_pointer() {
+    let text = emit_ok(&module_with_parameters(9), FILE);
+    assert_contains(&text, "ldr x8, [x29, #16]");
+}
+
+/// The ninth parameter is copied through a virtual register's cell (9) into its slot (8), as the naive allocator does.
+#[test]
+fn ninth_parameter_is_copied_into_its_slot_through_a_cell() {
+    let text = emit_ok(&module_with_parameters(9), FILE);
+    assert_run(
+        &text,
+        &[
+            "ldr x8, [x29, #16]",
+            "str x8, [sp, #72]",
+            "ldr x8, [sp, #72]",
+            "str x8, [sp, #64]",
+        ],
+    );
+}
+
+/// The tenth argument of a call goes to `[sp, #8]`.
+#[test]
+fn call_with_ten_arguments_stores_the_tenth_at_sp_plus_8() {
+    let text = emit_ok(&call_with_constants(10), FILE);
+    assert_run(&text, &["ldr x8, [sp, #88]", "str x8, [sp, #8]"]);
+}
+
+/// A call with nine arguments reserves a 16-byte outgoing area: 9 cells (72, rounded to 80) plus 16.
+#[test]
+fn call_with_nine_arguments_reserves_the_outgoing_area() {
+    let text = emit_ok(&call_with_constants(9), FILE);
+    assert_contains(&function_text(&text, "_em_main"), "sub sp, sp, #96");
+}
+
+/// A call with ten arguments reserves a 16-byte outgoing area: 10 cells (80) plus 16.
+#[test]
+fn call_with_ten_arguments_reserves_the_outgoing_area() {
+    let text = emit_ok(&call_with_constants(10), FILE);
+    assert_contains(&function_text(&text, "_em_main"), "sub sp, sp, #96");
+}
+
+/// A call with eight arguments needs no outgoing area: 8 cells is 64 bytes and nothing else.
+#[test]
+fn call_with_eight_arguments_has_no_outgoing_area() {
+    let text = emit_ok(&call_with_constants(8), FILE);
+    assert_contains(&function_text(&text, "_em_main"), "sub sp, sp, #64");
+}
+
+/// Eight parameters stay in registers: no load from above the frame pointer.
+#[test]
+fn eight_parameters_read_nothing_from_the_caller_frame() {
+    let text = emit_ok(&module_with_parameters(8), FILE);
+    assert_lacks(&text, "x29, #");
 }
 
 /// A load from a slot beyond the function's slots is an internal error.
@@ -1208,11 +1283,15 @@ fn far_min_constant_cell_is_addressed_through_x17() {
     assert_eq!(lines[movk + 2], "str x8, [sp, x17]");
 }
 
-/// The frame of a function with more than 4,096 cells is still built in `x16`.
+/// The frame of a function with more than 4,096 cells is probed, with its size (33,648 bytes: 4,206 cells) in `x9`.
 #[test]
-fn far_frame_with_isel_registers_is_built_in_x16() {
+fn far_frame_with_isel_registers_is_probed_and_built_in_x9() {
     let text = asm_of_huge_main(&["print(i * i)"]);
-    assert_contains(&text, "sub sp, sp, x16");
+    assert_run(
+        &text,
+        &["movz x9, #33648", "bl ___chkstk_darwin", "sub sp, sp, x9"],
+    );
+    assert_lacks(&text, "x16");
 }
 
 /// No `[sp, #offset]` in a function with more than 4,096 cells exceeds the 32760-byte immediate range.
@@ -1639,4 +1718,259 @@ fn relaxation_keeps_isel_labels() {
     for label in ["Lmain_panic0:", "Lmain_ok1:", "Lmain_panic2:"] {
         assert_eq!(count_lines(&text, label), 1, "{label}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2.1c: stack-passed arguments, stack probes and the 4 MiB frame limit.
+// ---------------------------------------------------------------------------------------------
+
+/// The largest frame, in bytes, that `emit` accepts.
+const MAX_FRAME: u64 = 4_194_304;
+
+/// The rendered message for a function whose frame is `bytes` long.
+fn frame_error(name: &str, bytes: u64) -> String {
+    format!("stack frame of `{name}` is too large: {bytes} bytes (the limit is {MAX_FRAME} bytes)")
+}
+
+/// A program with `fn f(a, b, c, d, e, f, g, h, i, j)` (empty body) and a `main` that calls it with 1..10.
+fn ten_parameter_program() -> String {
+    program(&[
+        "fn f(a: i64, b: i64, c: i64, d: i64, e: i64, p6: i64, g: i64, h: i64, i: i64, j: i64) {",
+        "}",
+        "fn main() {",
+        "    f(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)",
+        "}",
+    ])
+}
+
+/// A function with a 16-byte frame (`print(1)` in `main`) is not probed.
+#[test]
+fn small_frame_has_no_stack_probe() {
+    let text = function_text(&asm_of_main(&["print(1)"]), "_em_main");
+    assert_lacks(&text, "___chkstk_darwin");
+}
+
+/// A frame of exactly 4,096 bytes (511 slots, 4,088 rounded up) is probed, with its size in `x9`.
+#[test]
+fn frame_of_4096_bytes_is_probed() {
+    let text = emit_ok(&module_with_slots(511), FILE);
+    assert_run(
+        &text,
+        &[
+            "mov x29, sp",
+            "movz x9, #4096",
+            "bl ___chkstk_darwin",
+            "sub sp, sp, x9",
+        ],
+    );
+}
+
+/// A frame of 4,080 bytes (510 slots) is below the threshold: an immediate subtraction and no probe.
+#[test]
+fn frame_of_4080_bytes_is_not_probed() {
+    let text = emit_ok(&module_with_slots(510), FILE);
+    assert_contains(&text, "sub sp, sp, #4080");
+    assert_lacks(&text, "___chkstk_darwin");
+}
+
+/// A probed prologue keeps the frame pointer setup first, builds the size in `x9`, probes, then moves `sp`.
+#[test]
+fn probed_prologue_is_in_order() {
+    let mut body: Vec<String> = (0..600).map(|i| format!("v{i} := {i}")).collect();
+    body.extend((0..600).map(|i| format!("print(v{i})")));
+    let text = function_text(&asm(&main_with(&body)), "_em_main");
+    let lines = trimmed_lines(&text);
+    assert_eq!(
+        lines[..3],
+        ["stp x29, x30, [sp, #-16]!", "mov x29, sp", lines[2]]
+    );
+    assert!(
+        lines[2].starts_with("movz x9, #"),
+        "third line is `{}`",
+        lines[2]
+    );
+    let probe = lines.iter().position(|line| *line == "bl ___chkstk_darwin");
+    assert!(probe.is_some(), "no probe in:\n{text}");
+    let probe = probe.unwrap();
+    // Between the `movz` and the probe there are only `movk x9` chunks of the size.
+    assert!(
+        lines[3..probe]
+            .iter()
+            .all(|line| line.starts_with("movk x9, #"))
+    );
+    assert_eq!(lines[probe + 1], "sub sp, sp, x9");
+}
+
+/// A frame of exactly 4 MiB is accepted; its size `0x400000` is `movz x9, #0` and `movk x9, #64, lsl #16`.
+#[test]
+fn frame_of_4_mib_is_accepted() {
+    let text = emit_ok(&module_with_slots(524_288), FILE);
+    assert_run(
+        &text,
+        &[
+            "movz x9, #0",
+            "movk x9, #64, lsl #16",
+            "bl ___chkstk_darwin",
+            "sub sp, sp, x9",
+        ],
+    );
+}
+
+/// Asserts that emitting `module` fails with exactly `message` at `span`.
+fn assert_frame_error(module: &Module, message: &str, span: Span) {
+    let error = arm64::emit(module, FILE).unwrap_err();
+    assert_eq!(error.message, message);
+    assert_eq!(error.span, span);
+}
+
+/// A frame of 4,194,320 bytes (524,289 slots) is one rounding step over the limit: an error with the exact text.
+#[test]
+fn frame_over_4_mib_is_an_error_with_the_exact_message() {
+    let module = module_with_slots(524_289);
+    assert_frame_error(&module, &frame_error("main", 4_194_320), Span::new(0, 0));
+}
+
+/// The frame error is an ordinary error, not an internal compiler error.
+#[test]
+fn frame_over_4_mib_is_not_an_internal_error() {
+    let error = arm64::emit(&module_with_slots(524_289), FILE).unwrap_err();
+    assert!(!error.message.starts_with("internal compiler error"));
+}
+
+/// The frame error points at the function's span and names the function.
+#[test]
+fn frame_error_uses_the_function_span_and_name() {
+    let mut module = module_with_slots(524_289);
+    module.functions[0].name = "huge".to_string();
+    module.functions[0].span = Span::new(5, 9);
+    assert_frame_error(&module, &frame_error("huge", 4_194_320), Span::new(5, 9));
+}
+
+/// The first oversized function is the one reported, even when another function precedes it.
+#[test]
+fn frame_error_names_the_oversized_function_not_the_first() {
+    let mut module = module_with_slots(524_289);
+    let mut small = module_of(vec![], Terminator::Return(None));
+    small.functions[0].name = "small".to_string();
+    module.functions.insert(0, small.functions.remove(0));
+    assert_frame_error(&module, &frame_error("main", 4_194_320), Span::new(0, 0));
+}
+
+/// The outgoing area counts toward the limit: 4 MiB of cells plus a 16-byte area is over.
+#[test]
+fn outgoing_area_counts_toward_the_frame_limit() {
+    // 524,287 temps are 4,194,296 bytes, rounded to 4,194,304 (allowed alone); the 16-byte area makes 4,194,320.
+    let mut insts: Vec<Inst> = (0..524_287).map(|n| constant(n, 0)).collect();
+    insts.push(Inst::Call {
+        dst: None,
+        func: "main".to_string(),
+        args: (0..9).map(Temp).collect(),
+    });
+    let module = module_of(insts, Terminator::Return(None));
+    assert_frame_error(&module, &frame_error("main", 4_194_320), Span::new(0, 0));
+}
+
+/// The caller stores arguments 9 and 10 at `[sp, #0]` and `[sp, #8]`, before it loads the register arguments.
+#[test]
+fn caller_stores_stack_arguments_before_loading_registers() {
+    let text = function_text(&asm(&ten_parameter_program()), "_em_main");
+    // The ten literals are temps 0..9 and the outgoing area is 16 bytes, so temp `n` is at `16 + 8n`.
+    assert_run(
+        &text,
+        &[
+            "ldr x8, [sp, #80]",
+            "str x8, [sp, #0]",
+            "ldr x8, [sp, #88]",
+            "str x8, [sp, #8]",
+            "ldr x0, [sp, #16]",
+        ],
+    );
+}
+
+/// The last register argument is loaded right before the call.
+#[test]
+fn caller_loads_the_eighth_register_argument_right_before_the_call() {
+    let text = function_text(&asm(&ten_parameter_program()), "_em_main");
+    assert_run(&text, &["ldr x7, [sp, #72]", "bl _em_f"]);
+}
+
+/// The callee reads its ninth parameter from `[x29, #16]` and copies it into slot 8 through cell 10.
+#[test]
+fn callee_reads_the_ninth_parameter_above_the_frame_pointer() {
+    let text = function_text(&asm(&ten_parameter_program()), "_em_f");
+    // 10 slots, then the isel registers for parameters 8 and 9 in cells 10 and 11; no outgoing area.
+    assert_run(
+        &text,
+        &[
+            "ldr x8, [x29, #16]",
+            "str x8, [sp, #80]",
+            "ldr x8, [sp, #80]",
+            "str x8, [sp, #64]",
+        ],
+    );
+}
+
+/// The callee reads its tenth parameter from `[x29, #24]` and copies it into slot 9 through cell 11.
+#[test]
+fn callee_reads_the_tenth_parameter_above_the_frame_pointer() {
+    let text = function_text(&asm(&ten_parameter_program()), "_em_f");
+    assert_run(
+        &text,
+        &[
+            "ldr x8, [x29, #24]",
+            "str x8, [sp, #88]",
+            "ldr x8, [sp, #88]",
+            "str x8, [sp, #72]",
+        ],
+    );
+}
+
+/// The register parameters are still stored straight from `x0`..`x7`, before the stack ones are read.
+#[test]
+fn callee_stores_register_parameters_before_reading_stack_ones() {
+    let text = function_text(&asm(&ten_parameter_program()), "_em_f");
+    assert_run(&text, &["str x7, [sp, #56]", "ldr x8, [x29, #16]"]);
+}
+
+/// A function with 4,103 parameters: parameter 4,101 is `[x29, #32760]`, the last immediate offset.
+#[test]
+fn incoming_argument_at_offset_32760_is_an_immediate() {
+    let text = emit_ok(&module_with_parameters(4_103), FILE);
+    assert_contains(&text, "ldr x8, [x29, #32760]");
+}
+
+/// Parameter 4,102 is at `[x29, #32768]`, which needs `x17`.
+#[test]
+fn incoming_argument_at_offset_32768_goes_through_x17() {
+    let text = emit_ok(&module_with_parameters(4_103), FILE);
+    assert_run(&text, &["movz x17, #32768", "ldr x8, [x29, x17]"]);
+}
+
+/// A call with 4,105 arguments: argument 4,103 is stored at `[sp, #32760]`, the last immediate offset.
+#[test]
+fn outgoing_argument_at_offset_32760_is_an_immediate() {
+    let text = emit_ok(&call_with_constants(4_105), FILE);
+    assert_contains(&text, "str x8, [sp, #32760]");
+}
+
+/// Argument 4,104 of that call is stored at `[sp, #32768]`, which needs `x17`.
+#[test]
+fn outgoing_argument_at_offset_32768_goes_through_x17() {
+    let text = emit_ok(&call_with_constants(4_105), FILE);
+    assert_run(&text, &["movz x17, #32768", "str x8, [sp, x17]"]);
+}
+
+/// A function with no call of more than 8 arguments has the same cell offsets as Phase 1: slot 0 at `[sp, #0]`.
+#[test]
+fn functions_without_stack_arguments_keep_their_cell_offsets() {
+    let text = function_text(&asm(&fib_program()), "_em_fib");
+    assert_contains(&text, "str x0, [sp, #0]");
+    assert_lacks(&text, "x29, #");
+}
+
+/// Emitting a module with stack arguments twice gives the same text.
+#[test]
+fn stack_argument_output_is_deterministic() {
+    let module = call_with_constants(12);
+    assert_eq!(emit_ok(&module, FILE), emit_ok(&module, FILE));
 }

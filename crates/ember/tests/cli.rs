@@ -1026,3 +1026,75 @@ fn build_works_with_a_relative_tmpdir_that_looks_like_an_option() {
     let run = Command::new(dir.path.join("hello")).output().unwrap();
     assert_eq!(stdout_of(&run), "42\n");
 }
+
+// ---------------------------------------------------------------------------
+// M2.1c: the frame limit, seen from source
+// ---------------------------------------------------------------------------
+
+/// The largest expression decision 0025 allows: 500 ones added together (999 nodes, 999 cells in the frame).
+fn five_hundred_ones() -> String {
+    vec!["1"; 500].join(" + ")
+}
+
+/// A `main` that sets `x` once and then assigns it `assignments` more times, each from 500 ones, and prints it.
+fn big_frame_program(assignments: usize) -> String {
+    let expression = five_hundred_ones();
+    let mut text = format!("fn main() {{\n    x := {expression}\n");
+    for _ in 0..assignments {
+        text.push_str(&format!("    x = {expression}\n"));
+    }
+    text.push_str("    print(x)\n}\n");
+    text
+}
+
+/// A frame of 4,195,824 bytes (524,477 cells) makes `build` fail with a located error and exit 1.
+#[test]
+fn build_rejects_a_frame_over_4_mib() {
+    let dir = Scratch::new();
+    dir.write("big.em", big_frame_program(524));
+
+    let output = run_ember_in(&dir.path, &["build", "big.em", "-o", "out"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = stderr_of(&output);
+    assert_eq!(
+        stderr.lines().next().unwrap(),
+        "big.em:1:4: error: stack frame of `main` is too large: 4195824 bytes (the limit is 4194304 bytes)"
+    );
+    assert_eq!(stdout_of(&output), "");
+    assert_eq!(dir.entries(""), ["big.em"]);
+}
+
+/// `run` reports the same frame error with exit 1.
+#[test]
+fn run_rejects_a_frame_over_4_mib() {
+    let dir = Scratch::new();
+    dir.write("big.em", big_frame_program(524));
+
+    let output = run_ember_in(&dir.path, &["run", "big.em"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr_of(&output).starts_with("big.em:1:4: error: stack frame of `main` is too large"),
+        "stderr: {}",
+        stderr_of(&output)
+    );
+    assert_eq!(stdout_of(&output), "");
+}
+
+/// The same program with 400 assignments (a frame of about 3.2 MB) builds, runs and prints 500.
+#[test]
+fn run_accepts_a_frame_under_4_mib() {
+    let dir = Scratch::new();
+    dir.write("big.em", big_frame_program(400));
+
+    let output = run_ember_in(&dir.path, &["run", "big.em"]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        stderr_of(&output)
+    );
+    assert_eq!(stdout_of(&output), "500\n");
+}

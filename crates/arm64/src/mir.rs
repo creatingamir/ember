@@ -27,16 +27,31 @@ impl Reg {
     }
 }
 
-/// A memory operand. `Slot` and `Cell` exist until frame layout; `Address` after it.
+/// The register an address is relative to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Base {
+    /// The stack pointer: cells and outgoing arguments.
+    Sp,
+    /// The frame pointer `x29`: incoming stack arguments, which sit above the saved `x29` and `x30`.
+    Fp,
+}
+
+/// A memory operand. `Slot`, `Cell`, `InArg` and `OutArg` exist until frame layout; `Address` after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mem {
     /// The cell of an IR slot.
     Slot(ir::SlotId),
     /// The cell of a virtual register (only the allocator creates these).
     Cell(VReg),
-    /// `[sp, #offset]` when the offset is at most 32760, else `[sp, x17]` after `x17` is loaded.
+    /// Incoming stack argument `j` (argument number `8 + j`): `[x29, #16 + 8j]`.
+    InArg(u32),
+    /// Outgoing stack argument `j` of a call: `[sp, #8j]`.
+    OutArg(u32),
+    /// `[base, #offset]` when the offset is at most 32760, else `[base, x17]` after `x17` is loaded.
     Address {
-        /// The distance from `sp` in bytes.
+        /// The register the offset is added to.
+        base: Base,
+        /// The distance from the base register in bytes.
         offset: u64,
     },
 }
@@ -360,6 +375,10 @@ pub struct MFunction {
     pub slot_count: u32,
     /// The number of virtual registers (IR temps plus the ones isel makes); set by isel.
     pub vreg_count: u32,
+    /// Where the function's name is written; errors about the whole function point here.
+    pub span: Span,
+    /// The most stack arguments of any call in the function (arguments 9 and up).
+    pub out_args: u32,
     /// The number the next local label gets; isel stops at the first unused one and relaxation continues.
     pub next_label: u32,
     /// The instructions in order: `Prologue`, parameter stores, blocks, panic paths.

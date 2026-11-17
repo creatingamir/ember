@@ -1,0 +1,7 @@
+fn nine(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64) -> i64 {
+    return a - b + c - d + e - f + g - h + i
+}
+
+fn main() {
+    print(nine(1, 2, 3, 4, 5, 6, 7, 8, 9))
+}

@@ -1,5 +1,7 @@
 //! The types that make up an IR module.
 
+use source::Span;
+
 /// A temporary that is assigned exactly once; printed as `t0`, `t1`, and so on.
 ///
 /// Temps are function-wide: a temp may be used in a block other than the one that defines it.
@@ -43,6 +45,8 @@ pub struct Function {
     pub slots: Vec<Slot>,
     /// The blocks, where `blocks[i].id == BlockId(i)`; `blocks[0]` is the entry.
     pub blocks: Vec<Block>,
+    /// Where the function's name is written; errors about the whole function point here.
+    pub span: Span,
 }
 
 /// A memory cell that holds one named variable.

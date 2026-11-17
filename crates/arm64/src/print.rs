@@ -4,7 +4,7 @@ use source::Diagnostic;
 
 use crate::asm::Asm;
 use crate::frame::{MAX_ACCESS_OFFSET, MAX_IMMEDIATE_FRAME};
-use crate::mir::{Cond, MFunction, MInst, Mem, Reg, internal_error};
+use crate::mir::{Base, Cond, MFunction, MInst, Mem, Reg, internal_error};
 
 /// Writes `function` as the global symbol `_em_<name>`, or reports an operand that was not allocated or placed.
 pub fn print(asm: &mut Asm, function: &MFunction) -> Result<(), Diagnostic> {
@@ -95,27 +95,34 @@ fn print_prologue(asm: &mut Asm, frame_size: u64) {
     if frame_size <= MAX_IMMEDIATE_FRAME {
         asm.inst(&format!("sub sp, sp, #{frame_size}"));
     } else {
-        // The immediate of `sub` has only 12 bits, so a big size goes through a register.
-        asm.load_imm("x16", frame_size);
-        asm.inst("sub sp, sp, x16");
+        // The immediate of `sub` has only 12 bits, so a big size goes through a register. The probe
+        // touches every page of the new frame before `sp` moves. It keeps `x9` (clang relies on this
+        // too); `x16` and `x17` would not do, because a linker stub on `bl` may overwrite them.
+        asm.load_imm("x9", frame_size);
+        asm.inst("bl ___chkstk_darwin");
+        asm.inst("sub sp, sp, x9");
     }
 }
 
 /// Writes `ldr` or `str` for a stack address.
 fn print_access(asm: &mut Asm, mnemonic: &str, reg: Reg, mem: Mem) -> Result<(), Diagnostic> {
-    let Mem::Address { offset } = mem else {
+    let Mem::Address { base, offset } = mem else {
         return Err(internal_error(
             "a memory operand was not placed in the frame",
         ));
     };
     let reg = name(reg)?;
+    let base = match base {
+        Base::Sp => "sp",
+        Base::Fp => "x29",
+    };
     if offset <= MAX_ACCESS_OFFSET {
-        asm.inst(&format!("{mnemonic} {reg}, [sp, #{offset}]"));
+        asm.inst(&format!("{mnemonic} {reg}, [{base}, #{offset}]"));
     } else {
         // The immediate form stops at 32760 bytes, so a far cell gets its offset in a register.
         // x17 is safe: it is set and used by back-to-back instructions, never across a `bl`.
         asm.load_imm("x17", offset);
-        asm.inst(&format!("{mnemonic} {reg}, [sp, x17]"));
+        asm.inst(&format!("{mnemonic} {reg}, [{base}, x17]"));
     }
     Ok(())
 }
@@ -250,14 +257,11 @@ mod tests {
         for value in values {
             let offset = value & !7;
             insts.push(MInst::MovImm { dst: reg, value });
-            insts.push(MInst::Load {
-                dst: reg,
-                mem: Mem::Address { offset },
-            });
-            insts.push(MInst::Store {
-                src: reg,
-                mem: Mem::Address { offset },
-            });
+            for base in [Base::Sp, Base::Fp] {
+                let mem = Mem::Address { base, offset };
+                insts.push(MInst::Load { dst: reg, mem });
+                insts.push(MInst::Store { src: reg, mem });
+            }
         }
         insts
     }
@@ -265,7 +269,18 @@ mod tests {
     /// The size table matches the printer for every instruction, so branch relaxation can trust it.
     #[test]
     fn size_table_matches_the_printed_instruction_count() {
-        let frames = [0, 16, 4080, 4096, 65536, 1 << 32];
+        let frames = [
+            0,
+            16,
+            4080,
+            4096,
+            4112,
+            65536,
+            70_000,
+            1 << 20,
+            4 * 1024 * 1024,
+            1 << 32,
+        ];
         for frame_size in frames {
             let prologue = MInst::Prologue;
             assert_eq!(

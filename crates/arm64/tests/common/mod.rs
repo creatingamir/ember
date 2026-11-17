@@ -11,7 +11,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ir::{BinOp, Block, BlockId, Function, Inst, Loc, Temp, Terminator};
-use source::SourceFile;
+use source::{SourceFile, Span};
 
 /// The file name every test program is compiled under; it shows up in panic messages.
 pub const FILE: &str = "t.em";
@@ -145,11 +145,35 @@ pub fn run_module(module: &ir::Module) -> (String, String, i32) {
 
 /// Assembles, links and runs assembly text; returns the program's stdout, stderr and exit code.
 fn run_asm(asm: &str) -> (String, String, i32) {
+    run_asm_linked(asm, &["prog.o", "-o", "prog"])
+}
+
+/// The test-only C harness that runs `_em_main` on a small thread stack next to a guard and a canary.
+pub const GUARD_HARNESS: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/guard_harness.c");
+
+/// Emits assembly for an IR module and runs it under the guard harness (its own entry point, `_main` unused).
+pub fn run_module_in_guard_harness(module: &ir::Module) -> (String, String, i32) {
+    let asm = emit_ok(module, FILE);
+    run_asm_linked(
+        &asm,
+        &[
+            "prog.o",
+            GUARD_HARNESS,
+            "-Wl,-e,_harness_main",
+            "-o",
+            "prog",
+        ],
+    )
+}
+
+/// Assembles `asm` to `prog.o`, links with the given clang arguments, runs `prog`; returns stdout, stderr and exit code.
+fn run_asm_linked(asm: &str, link_args: &[&str]) -> (String, String, i32) {
     let dir = TempDir::new();
     fs::write(dir.path().join("prog.s"), asm).unwrap();
 
     clang(dir.path(), &["-c", "prog.s", "-o", "prog.o"], asm);
-    clang(dir.path(), &["prog.o", "-o", "prog"], asm);
+    clang(dir.path(), link_args, asm);
 
     let output = Command::new(dir.path().join("prog")).output().unwrap();
     // A process killed by a signal has no exit code; -1 makes the comparison fail loudly.
@@ -179,6 +203,7 @@ pub fn main_module(blocks: Vec<Block>) -> ir::Module {
             returns_value: false,
             slots: vec![],
             blocks,
+            span: Span::new(0, 0),
         }],
     }
 }
@@ -215,4 +240,26 @@ pub fn counter_program(first_line: &str, count: usize) -> String {
     body.extend((0..count).map(|_| "    x += 1".to_string()));
     body.push("    print(x)".to_string());
     main_with(&body)
+}
+
+/// A function whose first `param_count` slots are its parameters, with `slot_count` unnamed slots in all.
+pub fn ir_function(
+    name: &str,
+    param_count: u32,
+    returns_value: bool,
+    slot_count: u32,
+    blocks: Vec<Block>,
+) -> Function {
+    Function {
+        name: name.to_string(),
+        params: (0..param_count).map(ir::SlotId).collect(),
+        returns_value,
+        slots: (0..slot_count)
+            .map(|number| ir::Slot {
+                name: format!("s{number}"),
+            })
+            .collect(),
+        blocks,
+        span: Span::new(0, 0),
+    }
 }

@@ -6,8 +6,9 @@
 mod common;
 
 use common::{
-    MAX, MIN, binary, block_of, constant, counter_program, loc, main_module, main_with,
-    panic_stderr, program, run, run_module, unreachable_blocks,
+    MAX, MIN, binary, block_of, constant, counter_program, ir_function, loc, main_module,
+    main_with, panic_stderr, program, run, run_module, run_module_in_guard_harness,
+    unreachable_blocks,
 };
 use ir::{BinOp, Inst, Loc, Temp, Terminator};
 
@@ -1870,4 +1871,311 @@ fn far_negation_of_min_panics() {
     assert_eq!(stdout, "");
     assert_eq!(stderr, "panic: integer overflow at t.em:3:5\n");
     assert_eq!(code, 101);
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2.1c: stack-passed arguments, stack probes and the 4 MiB frame limit.
+// ---------------------------------------------------------------------------------------------
+
+/// `p1: i64, p2: i64, …, p<count>: i64`.
+fn parameter_list(count: usize) -> String {
+    (1..=count)
+        .map(|number| format!("p{number}: i64"))
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
+/// `first, first + 1, …, last` as call arguments.
+fn number_list(first: i64, last: i64) -> String {
+    (first..=last)
+        .map(|number| number.to_string())
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
+/// `p<count>, p<count - 1>, …, p1`.
+fn reversed_names(count: usize) -> String {
+    (1..=count)
+        .rev()
+        .map(|number| format!("p{number}"))
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
+/// A function `NAME(p1, …, pN) -> i64` that returns `p1 * 1 + p2 * 2 + … + pN * N`.
+fn weighted_sum_function(name: &str, count: usize) -> String {
+    let terms = (1..=count)
+        .map(|number| format!("p{number} * {number}"))
+        .collect::<Vec<String>>()
+        .join(" + ");
+    format!(
+        "fn {name}({}) -> i64 {{\n    return {terms}\n}}\n",
+        parameter_list(count)
+    )
+}
+
+/// `weigh` (a weighted sum) and a `g` that calls it with its own arguments reversed, then adds its last one.
+fn reversal_program(count: usize) -> String {
+    let mut text = weighted_sum_function("weigh", count);
+    text += &format!(
+        "fn g({}) -> i64 {{\n    return weigh({}) + p{count}\n}}\n",
+        parameter_list(count),
+        reversed_names(count)
+    );
+    text += &format!(
+        "fn main() {{\n    print(g({}))\n}}\n",
+        number_list(1, count as i64)
+    );
+    text
+}
+
+/// The nine-parameter program of the spec: alternating signs prove the argument order.
+fn nine_parameter_program() -> String {
+    program(&[
+        "fn nine(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64) -> i64 {",
+        "    return a - b + c - d + e - f + g - h + i",
+        "}",
+        "fn main() {",
+        "    print(nine(1, 2, 3, 4, 5, 6, 7, 8, 9))",
+        "}",
+    ])
+}
+
+/// Nine parameters: the ninth comes from the stack and the order is kept.
+#[test]
+fn nine_parameters_keep_their_order() {
+    assert_output(&nine_parameter_program(), "5\n");
+}
+
+/// Twenty parameters: 12 of them come from the stack; the weighted sum of 1 to 20 is 2,870.
+#[test]
+fn twenty_parameters_keep_their_order() {
+    let src = format!(
+        "{}fn main() {{\n    print(weigh({}))\n}}\n",
+        weighted_sum_function("weigh", 20),
+        number_list(1, 20)
+    );
+    assert_output(&src, "2870\n");
+}
+
+/// A 12-parameter caller passes its parameters reversed to a 12-parameter callee: each frame has its own outgoing area.
+#[test]
+fn twelve_parameters_survive_a_nested_call_with_reversed_arguments() {
+    assert_output(&reversal_program(12), "376\n");
+}
+
+/// The same with 20 parameters in both functions.
+#[test]
+fn twenty_parameters_survive_a_nested_call_with_reversed_arguments() {
+    assert_output(&reversal_program(20), "1560\n");
+}
+
+/// Stack arguments of mixed kinds (ints and bools) arrive in order: each bool flips its neighbour's sign.
+#[test]
+fn mixed_int_and_bool_stack_parameters_keep_their_order() {
+    let src = program(&[
+        "fn signed(v: i64, positive: bool) -> i64 {",
+        "    if positive {",
+        "        return v",
+        "    }",
+        "    return 0 - v",
+        "}",
+        "fn mixed(a: i64, ap: bool, b: i64, bp: bool, c: i64, cp: bool, d: i64, dp: bool, e: i64, ep: bool, f: i64, fp: bool) -> i64 {",
+        "    return signed(a, ap) + signed(b, bp) * 10 + signed(c, cp) * 100 + signed(d, dp) * 1000 + signed(e, ep) * 10000 + signed(f, fp) * 100000",
+        "}",
+        "fn main() {",
+        "    print(mixed(1, true, 2, false, 3, true, 4, false, 5, true, 6, false))",
+        "}",
+    ]);
+    assert_output(&src, "-553719\n");
+}
+
+/// A recursive function with a bool and an int on the stack flips the bool at every level and sums the ints.
+#[test]
+fn recursion_with_mixed_stack_parameters() {
+    let src = program(&[
+        "fn walk(n: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, flag: bool, acc: i64) -> i64 {",
+        "    if n == 0 {",
+        "        if flag {",
+        "            return acc",
+        "        }",
+        "        return 0 - acc",
+        "    }",
+        "    return walk(n - 1, a, b, c, d, e, f, g, !flag, acc + n)",
+        "}",
+        "fn main() {",
+        "    print(walk(5, 0, 0, 0, 0, 0, 0, 0, true, 0))",
+        "    print(walk(4, 0, 0, 0, 0, 0, 0, 0, true, 0))",
+        "}",
+    ]);
+    assert_output(&src, "-15\n10\n");
+}
+
+/// Ten parameters, 10,000 levels deep: the stack parameter counts the levels and survives every call.
+#[test]
+fn deep_recursion_with_ten_parameters() {
+    let src = program(&[
+        "fn down(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, n: i64) -> i64 {",
+        "    if n == 0 {",
+        "        return a + i",
+        "    }",
+        "    return down(a + 1, b, c, d, e, f, g, h, i, n - 1)",
+        "}",
+        "fn main() {",
+        "    print(down(0, 1, 2, 3, 4, 5, 6, 7, 8, 10000))",
+        "}",
+    ]);
+    assert_output(&src, "10008\n");
+}
+
+/// A callee with a probed frame (600 locals) and ten parameters, called from a probed frame, reads its stack parameters.
+#[test]
+fn stack_arguments_work_with_frames_above_4_kib() {
+    // Each local is declared and added to `total`, so the checker sees every one used; the sum of 0..599 is 179,700.
+    let mut locals = vec!["    total := 0".to_string()];
+    for n in 0..600 {
+        locals.push(format!("    v{n} := {n}"));
+        locals.push(format!("    total = total + v{n}"));
+    }
+    let mut lines = vec![
+        "fn big(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64, j: i64) -> i64 {".to_string(),
+    ];
+    lines.extend(locals.clone());
+    lines.push("    return i * 1000 + j * 10 + total".to_string());
+    lines.push("}".to_string());
+    lines.push("fn main() {".to_string());
+    lines.extend(locals);
+    lines.push("    print(big(1, 2, 3, 4, 5, 6, 7, 8, 9, 10))".to_string());
+    lines.push("    print(total)".to_string());
+    lines.push("}".to_string());
+    // 9 * 1000 + 10 * 10 + 179,700 = 188,800.
+    assert_output(&program(&lines), "188800\n179700\n");
+}
+
+/// The 600-local program of the old `x16` frame test runs and prints every value with its frame probed.
+#[test]
+fn probed_frame_runs_normally() {
+    let mut body: Vec<String> = (0..600).map(|n| format!("v{n} := {n}")).collect();
+    body.extend((0..600).map(|n| format!("print(v{n})")));
+    let expected: String = (0..600).map(|n| format!("{n}\n")).collect();
+    assert_output(&main_with(&body), &expected);
+}
+
+/// A `main` with `slot_count` slots that stores 7 into the last slot, loads it back and prints it.
+fn store_and_print_module(slot_count: u32) -> ir::Module {
+    let last = ir::SlotId(slot_count - 1);
+    let insts = vec![
+        constant(0, 7),
+        Inst::Store {
+            slot: last,
+            src: Temp(0),
+        },
+        Inst::Load {
+            dst: Temp(1),
+            slot: last,
+        },
+        Inst::Print {
+            src: Temp(1),
+            kind: ir::PrintKind::I64,
+        },
+    ];
+    let main = ir_function(
+        "main",
+        0,
+        false,
+        slot_count,
+        vec![block_of(0, insts, Terminator::Return(None))],
+    );
+    ir::Module {
+        functions: vec![main],
+    }
+}
+
+/// A frame of exactly 4 MiB (524,286 slots and two temps) is built, probed and used: the last slot holds 7.
+#[test]
+fn a_4_mib_frame_runs() {
+    let module = store_and_print_module(524_286);
+    assert_eq!(run_module(&module), ("7\n".to_string(), String::new(), 0));
+}
+
+/// A callee with 4,110 parameters (its late stack parameters need `x17`) gets 4,110 arguments (the caller's stores do too).
+fn far_stack_argument_module() -> ir::Module {
+    let count = 4_110;
+    let loads: Vec<Inst> = [8, 4_101, 4_102, 4_109]
+        .iter()
+        .enumerate()
+        .map(|(temp, slot)| Inst::Load {
+            dst: Temp(temp as u32),
+            slot: ir::SlotId(*slot),
+        })
+        .collect();
+    let mut body = loads;
+    body.push(binary(4, BinOp::Sub, 2, 1));
+    body.push(binary(5, BinOp::Sub, 3, 0));
+    body.push(constant(6, 10));
+    body.push(binary(7, BinOp::Mul, 5, 6));
+    body.push(binary(8, BinOp::Add, 7, 4));
+    let far = ir_function(
+        "far",
+        count,
+        true,
+        count,
+        vec![block_of(0, body, Terminator::Return(Some(Temp(8))))],
+    );
+
+    let mut main_body: Vec<Inst> = (0..count).map(|n| constant(n, i64::from(n))).collect();
+    main_body.push(Inst::Call {
+        dst: Some(Temp(count)),
+        func: "far".to_string(),
+        args: (0..count).map(Temp).collect(),
+    });
+    main_body.push(Inst::Print {
+        src: Temp(count),
+        kind: ir::PrintKind::I64,
+    });
+    let main = ir_function(
+        "main",
+        0,
+        false,
+        0,
+        vec![block_of(0, main_body, Terminator::Return(None))],
+    );
+    ir::Module {
+        functions: vec![main, far],
+    }
+}
+
+/// Stack arguments beyond offset 32760 (parameters 4,102 and up, in the caller and the callee) arrive intact.
+#[test]
+fn far_stack_arguments_arrive_intact() {
+    // (p4109 - p8) * 10 + (p4102 - p4101) = 4101 * 10 + 1; swapping 4101 and 4102 would give 41009.
+    assert_eq!(
+        run_module(&far_stack_argument_module()),
+        ("41011\n".to_string(), String::new(), 0)
+    );
+}
+
+/// The guard-gap test: a 1 MiB frame on a thread with a 16 KiB guard must fault on the guard (exit 42), not overwrite the canary (exit 1).
+#[test]
+fn big_frame_faults_on_the_guard_instead_of_jumping_it() {
+    // 131,072 slots and one temp make a frame of 1,048,592 bytes; slot 0, the lowest address, gets a 1.
+    let insts = vec![
+        constant(0, 1),
+        Inst::Store {
+            slot: ir::SlotId(0),
+            src: Temp(0),
+        },
+    ];
+    let main = ir_function(
+        "main",
+        0,
+        false,
+        131_072,
+        vec![block_of(0, insts, Terminator::Return(None))],
+    );
+    let module = ir::Module {
+        functions: vec![main],
+    };
+    let (stdout, stderr, code) = run_module_in_guard_harness(&module);
+    assert_eq!(code, 42, "stdout: {stdout}\nstderr: {stderr}");
 }

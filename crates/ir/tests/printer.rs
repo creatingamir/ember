@@ -7,6 +7,7 @@ use ir::{
     BinOp, Block, BlockId, Function, Inst, Loc, Module, PrintKind, Slot, SlotId, Temp, Terminator,
     print_module,
 };
+use source::Span;
 
 /// Joins lines into one text that ends with a newline.
 fn text(lines: &[&str]) -> String {
@@ -53,6 +54,7 @@ fn function(
             })
             .collect(),
         blocks,
+        span: Span::new(0, 0),
     }
 }
 
