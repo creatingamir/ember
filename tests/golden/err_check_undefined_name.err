@@ -1,0 +1,3 @@
+err_check_undefined_name.em:2:11: error: undefined name `y`
+        print(y)
+              ^

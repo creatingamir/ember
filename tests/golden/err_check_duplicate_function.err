@@ -1,0 +1,3 @@
+err_check_duplicate_function.em:4:4: error: function `f` is already defined
+    fn f() {
+       ^

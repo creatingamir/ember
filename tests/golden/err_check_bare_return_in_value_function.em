@@ -1,0 +1,6 @@
+fn f() -> i64 {
+    return
+}
+
+fn main() {
+}

@@ -1,0 +1,3 @@
+limit_nesting_unary_too_deep.em:2:74: error: nesting is too deep (limit 64)
+        x := -----------------------------------------------------------------1
+                                                                             ^

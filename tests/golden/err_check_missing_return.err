@@ -1,0 +1,3 @@
+err_check_missing_return.em:1:4: error: function `sign` must return a value on every path
+    fn sign(n: i64) -> i64 {
+       ^

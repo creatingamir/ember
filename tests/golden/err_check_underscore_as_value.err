@@ -1,0 +1,3 @@
+err_check_underscore_as_value.em:3:11: error: `_` cannot be used as a value
+        print(_)
+              ^

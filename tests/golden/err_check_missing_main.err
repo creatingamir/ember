@@ -1,0 +1,3 @@
+err_check_missing_main.em:1:1: error: missing `fn main()`
+    fn helper() {
+    ^

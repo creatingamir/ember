@@ -1,0 +1,3 @@
+err_check_integer_does_not_fit.em:2:10: error: integer literal does not fit in `i64`
+        x := 9223372036854775808
+             ^

@@ -1,0 +1,15 @@
+err_check_five_errors.em:8:4: error: function `dup` is already defined
+    fn dup() {
+       ^
+err_check_five_errors.em:12:14: error: expected `i64`, found `bool`
+        x: i64 = true
+                 ^
+err_check_five_errors.em:14:11: error: `helper` takes 2 arguments, but 1 were given
+        print(helper(1))
+              ^
+err_check_five_errors.em:15:5: error: `break` outside of a loop
+        break
+        ^
+err_check_five_errors.em:16:11: error: undefined name `z`
+        print(z)
+              ^

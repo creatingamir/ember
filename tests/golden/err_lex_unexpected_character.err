@@ -1,0 +1,3 @@
+err_lex_unexpected_character.em:2:12: error: unexpected character `$`
+        x := 5 $ 3
+               ^

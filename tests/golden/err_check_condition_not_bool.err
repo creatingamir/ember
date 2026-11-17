@@ -1,0 +1,3 @@
+err_check_condition_not_bool.em:2:8: error: expected `bool`, found `i64`
+        if 1 {
+           ^

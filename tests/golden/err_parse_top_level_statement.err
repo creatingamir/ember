@@ -1,0 +1,3 @@
+err_parse_top_level_statement.em:1:1: error: expected `fn`, found identifier `x`
+    x := 1
+    ^

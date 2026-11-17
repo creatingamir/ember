@@ -1,0 +1,3 @@
+err_lex_unterminated_string.em:2:11: error: unterminated string literal
+        print("hello)
+              ^

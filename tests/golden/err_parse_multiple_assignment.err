@@ -1,0 +1,3 @@
+err_parse_multiple_assignment.em:2:6: error: multiple assignment is not supported yet
+        a, b := 1, 2
+         ^

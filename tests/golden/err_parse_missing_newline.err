@@ -1,0 +1,3 @@
+err_parse_missing_newline.em:2:12: error: expected newline or `}` after statement, found identifier `y`
+        x := 1 y := 2
+               ^

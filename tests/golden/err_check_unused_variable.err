@@ -1,0 +1,3 @@
+err_check_unused_variable.em:2:5: error: `x` is declared but never used
+        x := 5
+        ^

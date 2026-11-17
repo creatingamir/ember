@@ -1,0 +1,3 @@
+err_parse_chained_comparison.em:3:14: error: comparison operators cannot be chained
+        if 1 < x < 3 {
+                 ^

@@ -1,0 +1,9 @@
+err_check_three_errors_in_source_order.em:2:5: error: `unused` is declared but never used
+        unused := 1
+        ^
+err_check_three_errors_in_source_order.em:3:16: error: expected `i64`, found `bool`
+        return n + true
+                   ^
+err_check_three_errors_in_source_order.em:7:11: error: undefined name `missing`
+        print(missing)
+              ^

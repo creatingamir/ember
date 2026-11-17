@@ -1,0 +1,3 @@
+err_check_assign_mismatch.em:3:9: error: expected `i64`, found `bool`
+        x = true
+            ^

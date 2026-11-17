@@ -1,0 +1,3 @@
+err_parse_match_statement.em:2:5: error: `match` is not supported yet
+        match 1 {
+        ^

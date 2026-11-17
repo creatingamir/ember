@@ -1,0 +1,3 @@
+err_lex_stops_at_first.em:2:10: error: unexpected character `$`
+        x := $ + #
+             ^

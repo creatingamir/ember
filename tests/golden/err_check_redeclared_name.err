@@ -1,0 +1,3 @@
+err_check_redeclared_name.em:3:5: error: `x` is already declared
+        x := 2
+        ^

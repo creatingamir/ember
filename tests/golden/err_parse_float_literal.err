@@ -1,0 +1,3 @@
+err_parse_float_literal.em:2:10: error: float literals are not supported yet
+        x := 1.5
+             ^

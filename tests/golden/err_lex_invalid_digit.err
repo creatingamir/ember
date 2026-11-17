@@ -1,0 +1,3 @@
+err_lex_invalid_digit.em:2:14: error: invalid character `2` in number literal
+        x := 0b102
+                 ^

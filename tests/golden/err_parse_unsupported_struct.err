@@ -1,0 +1,3 @@
+err_parse_unsupported_struct.em:1:1: error: `struct` declarations are not supported yet
+    struct Point {
+    ^

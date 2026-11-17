@@ -1,0 +1,6 @@
+struct Point {
+    x: i64
+}
+
+fn main() {
+}

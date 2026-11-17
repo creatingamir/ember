@@ -1,0 +1,4 @@
+fn main() {
+    x := + 5
+    print(x)
+}

@@ -1,0 +1,131 @@
+fn main() {
+print(1)
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+if true {
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}

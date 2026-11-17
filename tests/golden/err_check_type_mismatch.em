@@ -1,0 +1,4 @@
+fn main() {
+    x: i64 = true
+    print(x)
+}
