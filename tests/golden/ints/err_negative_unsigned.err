@@ -1,0 +1,3 @@
+ints/err_negative_unsigned.em:2:14: error: integer literal does not fit in `u8`
+        x: u8 = -1
+                 ^

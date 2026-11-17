@@ -152,12 +152,10 @@ fn unknown_let_annotation_is_reported_at_the_type() {
     assert_single_error(&src, "unknown type `foo`", "foo", 0);
 }
 
-/// Every spec type outside the Phase 1 subset says it is not supported yet.
+/// Every spec type that is neither an integer nor `bool` says it is not supported yet.
 #[test]
 fn spec_types_outside_the_subset_are_not_supported_yet() {
-    let names = [
-        "i8", "i16", "i32", "u8", "u16", "u32", "u64", "f16", "bf16", "f32", "f64", "str",
-    ];
+    let names = ["f16", "bf16", "f32", "f64", "str"];
     for name in names {
         let src = format!("fn helper(val: {name}) {{\n}}\nfn main() {{\n}}\n");
         let message = format!("type `{name}` is not supported yet");

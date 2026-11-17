@@ -15,16 +15,8 @@ pub use types::{TypeId, TypeKind, TypeTable};
 /// The name of the built-in print function.
 const PRINT: &str = "print";
 
-/// The type names from the language spec that Phase 1 does not support yet.
-const UNSUPPORTED_TYPES: [&str; 12] = [
-    "i8", "i16", "i32", "u8", "u16", "u32", "u64", "f16", "bf16", "f32", "f64", "str",
-];
-
-/// The largest value of an `i64` literal.
-const I64_MAX_MAGNITUDE: u64 = i64::MAX.unsigned_abs();
-
-/// The magnitude of `i64::MIN`, which is only allowed directly under a unary minus.
-const I64_MIN_MAGNITUDE: u64 = i64::MIN.unsigned_abs();
+/// The type names from the language spec that are not supported yet.
+const UNSUPPORTED_TYPES: [&str; 5] = ["f16", "bf16", "f32", "f64", "str"];
 
 /// What a name or an assignment target refers to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +72,8 @@ enum Ty {
 impl Ty {
     /// The `i64` type.
     const I64: Ty = Ty::Known(TypeId::I64);
+    /// An integer that has not taken its type yet.
+    const UNTYPED: Ty = Ty::Known(TypeId::UNTYPED_INT);
     /// The `bool` type.
     const BOOL: Ty = Ty::Known(TypeId::BOOL);
     /// The type of no value.
@@ -138,14 +132,6 @@ struct LetDecl {
     /// The variable name.
     name: String,
     /// Where the name appears.
-    span: Span,
-}
-
-/// An argument of a call, checked before the callee is looked at.
-struct Argument {
-    /// The type of the argument.
-    ty: Ty,
-    /// Where the argument appears.
     span: Span,
 }
 
@@ -268,7 +254,14 @@ impl Checker {
     fn resolve_type(&mut self, type_expr: &TypeExpr) -> Ty {
         let name = type_expr.name.name.as_str();
         match name {
+            "i8" => Ty::Known(TypeId::I8),
+            "i16" => Ty::Known(TypeId::I16),
+            "i32" => Ty::Known(TypeId::I32),
             "i64" => Ty::I64,
+            "u8" => Ty::Known(TypeId::U8),
+            "u16" => Ty::Known(TypeId::U16),
+            "u32" => Ty::Known(TypeId::U32),
+            "u64" => Ty::Known(TypeId::U64),
             "bool" => Ty::BOOL,
             _ if UNSUPPORTED_TYPES.contains(&name) => {
                 self.error(
@@ -424,6 +417,139 @@ impl Checker {
         }
     }
 
+    /// Reports an error that is a bug of the compiler, not of the program.
+    fn internal_error(&mut self, what: &str, span: Span) {
+        self.error(format!("internal compiler error: {what}"), span);
+    }
+
+    /// Tells whether a type is one of the eight integer types.
+    fn is_integer(&self, ty: TypeId) -> bool {
+        matches!(self.checked.types.kind(ty), TypeKind::Int { .. })
+    }
+
+    /// Tells whether a checker type is one of the eight integer types, which an untyped integer is not.
+    fn is_typed_integer(&self, ty: Ty) -> bool {
+        match ty {
+            Ty::Known(id) => self.is_integer(id),
+            Ty::Error => false,
+        }
+    }
+
+    /// Like `expect`, but an untyped integer where `expected` is an integer type takes that type.
+    ///
+    /// Returns false when it reported an error.
+    fn expect_expr(&mut self, expected: Ty, found: Ty, expr: &Expr) -> bool {
+        if let Ty::Known(expected_id) = expected
+            && found == Ty::UNTYPED
+            && self.is_integer(expected_id)
+        {
+            return self.settle(expr, expected_id);
+        }
+        self.expect(expected, found, expr.span)
+    }
+
+    /// Gives an untyped integer the type `i64`, its default; any other type is returned unchanged.
+    fn settle_to_default(&mut self, expr: &Expr, ty: Ty) -> Ty {
+        if ty != Ty::UNTYPED {
+            return ty;
+        }
+        self.settle(expr, TypeId::I64);
+        Ty::I64
+    }
+
+    /// Gives an untyped expression the integer type `ty`, on it and on every untyped node inside it.
+    ///
+    /// Reports literals that do not fit and negations of unsigned values; returns false when it did.
+    /// Each node is visited once, because a settled node is never settled again.
+    fn settle(&mut self, expr: &Expr, ty: TypeId) -> bool {
+        self.record_expr_type(expr.id, Ty::Known(ty));
+        match &expr.kind {
+            ExprKind::Int(magnitude) => self.check_literal_fits(*magnitude, false, expr.span, ty),
+            ExprKind::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => self.settle_negation(expr, operand, ty),
+            ExprKind::Binary {
+                op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem,
+                left,
+                right,
+            } => {
+                let left_ok = self.settle(left, ty);
+                let right_ok = self.settle(right, ty);
+                left_ok && right_ok
+            }
+            _ => {
+                self.internal_error(
+                    "an expression that is not a constant has no type",
+                    expr.span,
+                );
+                false
+            }
+        }
+    }
+
+    /// Settles `-operand`; a minus sign directly on a literal belongs to the literal (decision 0049, number 3).
+    fn settle_negation(&mut self, expr: &Expr, operand: &Expr, ty: TypeId) -> bool {
+        if let ExprKind::Int(magnitude) = &operand.kind {
+            self.record_expr_type(operand.id, Ty::Known(ty));
+            return self.check_literal_fits(*magnitude, true, operand.span, ty);
+        }
+
+        // The operand is left alone after this error, so `- -1` for a `u8` is reported once.
+        if !self.check_negatable(ty, expr.span) {
+            return false;
+        }
+        self.settle(operand, ty)
+    }
+
+    /// Reports a negation of an unsigned type; returns false when it did.
+    fn check_negatable(&mut self, ty: TypeId, span: Span) -> bool {
+        if let TypeKind::Int { signed: false, .. } = self.checked.types.kind(ty) {
+            let name = self.type_name(ty);
+            let message = format!("cannot negate a value of unsigned type `{name}`");
+            self.error(message, span);
+            return false;
+        }
+        true
+    }
+
+    /// Reports an integer literal that is outside the range of `ty`; returns false when it did.
+    ///
+    /// `negative` is true for a literal under a minus sign. `span` is where the digits are.
+    fn check_literal_fits(
+        &mut self,
+        magnitude: u64,
+        negative: bool,
+        span: Span,
+        ty: TypeId,
+    ) -> bool {
+        let TypeKind::Int { bits, signed } = self.checked.types.kind(ty) else {
+            self.internal_error(
+                "an integer literal was given a type that is not an integer",
+                span,
+            );
+            return false;
+        };
+
+        // i128 holds every value of every integer type, so the comparison cannot overflow.
+        let value = if negative {
+            -i128::from(magnitude)
+        } else {
+            i128::from(magnitude)
+        };
+        let (min, max) = if signed {
+            (-(1_i128 << (bits - 1)), (1_i128 << (bits - 1)) - 1)
+        } else {
+            (0, (1_i128 << bits) - 1)
+        };
+        if value < min || value > max {
+            let name = self.type_name(ty);
+            self.error(format!("integer literal does not fit in `{name}`"), span);
+            return false;
+        }
+        true
+    }
+
     /// Reports a value that is `()`; returns false when it did.
     fn require_value(&mut self, ty: Ty, span: Span) -> bool {
         if ty == Ty::UNIT {
@@ -490,13 +616,13 @@ impl Checker {
             Some(type_expr) => {
                 let declared = self.resolve_type(type_expr);
                 if self.require_value(value_ty, value.span) {
-                    self.expect(declared, value_ty, value.span);
+                    self.expect_expr(declared, value_ty, value);
                 }
                 declared
             }
             None => {
                 if self.require_value(value_ty, value.span) {
-                    value_ty
+                    self.settle_to_default(value, value_ty)
                 } else {
                     Ty::Error
                 }
@@ -530,14 +656,23 @@ impl Checker {
 
         match op {
             AssignOp::Assign => {
-                self.expect(target_ty, value_ty, value.span);
+                self.expect_expr(target_ty, value_ty, value);
             }
             _ => {
                 // A bad target is reported alone; the value is only checked when the target is fine.
-                if self.expect(Ty::I64, target_ty, target.span) {
-                    self.expect(Ty::I64, value_ty, value.span);
+                if self.check_compound_target(target_ty, target.span) {
+                    self.expect_expr(target_ty, value_ty, value);
                 }
             }
+        }
+    }
+
+    /// Reports a target of `+=` and the like that is not an integer; returns false when it did.
+    fn check_compound_target(&mut self, target_ty: Ty, span: Span) -> bool {
+        match target_ty {
+            // `i64` is an integer, so this call reports every other type.
+            Ty::Known(ty) if !self.is_integer(ty) => self.expect(Ty::I64, target_ty, span),
+            _ => true,
         }
     }
 
@@ -589,9 +724,9 @@ impl Checker {
             }
             ForKind::In { var, iterable } => {
                 // The range is checked before the loop variable exists, so it cannot use it.
-                self.check_iterable(iterable);
+                let var_ty = self.check_iterable(iterable);
                 self.push_scope();
-                self.declare(var, stmt.id, Ty::I64);
+                self.declare(var, stmt.id, var_ty);
                 self.check_loop_body(body);
                 self.pop_scope();
             }
@@ -606,19 +741,22 @@ impl Checker {
     }
 
     /// Checks the value after `in`, which must be a range written right there.
-    fn check_iterable(&mut self, iterable: &Expr) {
+    ///
+    /// Returns the type of the loop variable: the type of the bounds.
+    fn check_iterable(&mut self, iterable: &Expr) -> Ty {
         match &iterable.kind {
             ExprKind::Binary {
                 op: BinaryOp::Range | BinaryOp::RangeInclusive,
                 left,
                 right,
-            } => self.check_operands(Ty::I64, left, right),
+            } => self.check_operands_with_default(left, right),
             _ => {
                 let errors_before = self.diagnostics.len();
                 self.check_expr(iterable);
                 if self.diagnostics.len() == errors_before {
                     self.error("only ranges can be iterated over yet", iterable.span);
                 }
+                Ty::Error
             }
         }
     }
@@ -653,7 +791,7 @@ impl Checker {
     fn check_return_value(&mut self, expr: &Expr) {
         let ty = self.check_expr(expr);
         if self.fn_ret != Ty::UNIT {
-            self.expect(self.fn_ret, ty, expr.span);
+            self.expect_expr(self.fn_ret, ty, expr);
         } else if ty != Ty::Error {
             let message = format!("function `{}` does not return a value", self.fn_name);
             self.error(message, expr.span);
@@ -674,7 +812,8 @@ impl Checker {
     /// Checks an expression and records its type.
     fn check_expr(&mut self, expr: &Expr) -> Ty {
         let ty = match &expr.kind {
-            ExprKind::Int(value) => self.check_int(*value, expr.span),
+            // A literal has no type until its context gives it one.
+            ExprKind::Int(_) => Ty::UNTYPED,
             ExprKind::Bool(_) => Ty::BOOL,
             ExprKind::Name(name) => self.check_name(expr, name),
             ExprKind::Unary { op, operand } => self.check_unary(expr, *op, operand),
@@ -683,15 +822,6 @@ impl Checker {
         };
         self.record_expr_type(expr.id, ty);
         ty
-    }
-
-    /// Checks that an integer literal fits in an `i64`.
-    fn check_int(&mut self, value: u64, span: Span) -> Ty {
-        if value > I64_MAX_MAGNITUDE {
-            self.error("integer literal does not fit in `i64`", span);
-            return Ty::Error;
-        }
-        Ty::I64
     }
 
     /// Resolves a name that is read as a value.
@@ -718,11 +848,7 @@ impl Checker {
     /// Checks a prefix operator.
     fn check_unary(&mut self, expr: &Expr, op: UnaryOp, operand: &Expr) -> Ty {
         match op {
-            UnaryOp::Neg => {
-                let operand_ty = self.check_negated_operand(operand);
-                self.expect(Ty::I64, operand_ty, operand.span);
-                Ty::I64
-            }
+            UnaryOp::Neg => self.check_negation(expr, operand),
             UnaryOp::Not => {
                 let operand_ty = self.check_expr(operand);
                 self.expect(Ty::BOOL, operand_ty, operand.span);
@@ -736,28 +862,36 @@ impl Checker {
         }
     }
 
-    /// Checks the operand of a unary minus, where the literal 9223372036854775808 is `i64::MIN`.
-    fn check_negated_operand(&mut self, operand: &Expr) -> Ty {
-        if operand.kind == ExprKind::Int(I64_MIN_MAGNITUDE) {
-            self.record_expr_type(operand.id, Ty::I64);
-            return Ty::I64;
+    /// Checks `-e`: `e` must be a signed integer, and the result has its type.
+    fn check_negation(&mut self, expr: &Expr, operand: &Expr) -> Ty {
+        let operand_ty = self.check_expr(operand);
+        let Ty::Known(id) = operand_ty else {
+            return Ty::Error;
+        };
+        if operand_ty == Ty::UNTYPED {
+            // The context decides the type, and then whether it can be negated.
+            return Ty::UNTYPED;
         }
-        self.check_expr(operand)
+        if !self.is_integer(id) {
+            self.expect(Ty::I64, operand_ty, operand.span);
+            return Ty::Error;
+        }
+        self.check_negatable(id, expr.span);
+        operand_ty
     }
 
     /// Checks an infix operator.
     fn check_binary(&mut self, expr: &Expr, op: BinaryOp, left: &Expr, right: &Expr) -> Ty {
         match op {
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
-                self.check_operands(Ty::I64, left, right);
-                Ty::I64
+                self.check_operands(left, right)
             }
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                self.check_operands(Ty::I64, left, right);
+                self.check_operands_with_default(left, right);
                 Ty::BOOL
             }
             BinaryOp::And | BinaryOp::Or => {
-                self.check_operands(Ty::BOOL, left, right);
+                self.check_bool_operands(left, right);
                 Ty::BOOL
             }
             BinaryOp::Eq | BinaryOp::Ne => {
@@ -784,37 +918,95 @@ impl Checker {
         }
     }
 
-    /// Checks that both operands have the expected type, reporting only the first that does not.
-    fn check_operands(&mut self, expected: Ty, left: &Expr, right: &Expr) {
+    /// The type that two operands must share: the type of the first typed integer, left first.
+    ///
+    /// Two untyped operands stay untyped. Otherwise the type is `i64`, so that an operand that is
+    /// not an integer is reported against `i64`, as in Phase 1 (decision 0049, number 1).
+    fn operand_type(&self, left_ty: Ty, right_ty: Ty) -> Ty {
+        for ty in [left_ty, right_ty] {
+            if self.is_typed_integer(ty) {
+                return ty;
+            }
+        }
+        if left_ty == Ty::UNTYPED && right_ty == Ty::UNTYPED {
+            return Ty::UNTYPED;
+        }
+        Ty::I64
+    }
+
+    /// Checks two operands that must be integers of one type, reporting only the first that is not.
+    ///
+    /// Returns that type; the untyped type when both operands are untyped; `Ty::Error` when an
+    /// operand is wrong or already had an error, so that no second error follows from the result.
+    fn check_operands(&mut self, left: &Expr, right: &Expr) -> Ty {
         let left_ty = self.check_expr(left);
         let right_ty = self.check_expr(right);
-        if self.expect(expected, left_ty, left.span) {
-            self.expect(expected, right_ty, right.span);
+        let expected = self.operand_type(left_ty, right_ty);
+        if expected == Ty::UNTYPED {
+            // Both operands are untyped, so the context settles them later.
+            return expected;
+        }
+
+        // `&&` stops at the first error, so only one is reported.
+        let operands_ok = self.expect_expr(expected, left_ty, left)
+            && self.expect_expr(expected, right_ty, right);
+        if operands_ok && left_ty != Ty::Error && right_ty != Ty::Error {
+            return expected;
+        }
+        Ty::Error
+    }
+
+    /// Like `check_operands`, but two untyped operands settle to `i64` right here.
+    fn check_operands_with_default(&mut self, left: &Expr, right: &Expr) -> Ty {
+        let ty = self.check_operands(left, right);
+        if ty != Ty::UNTYPED {
+            return ty;
+        }
+        self.settle(left, TypeId::I64);
+        self.settle(right, TypeId::I64);
+        Ty::I64
+    }
+
+    /// Checks that both operands are `bool`, reporting only the first that is not.
+    fn check_bool_operands(&mut self, left: &Expr, right: &Expr) {
+        let left_ty = self.check_expr(left);
+        let right_ty = self.check_expr(right);
+        if self.expect(Ty::BOOL, left_ty, left.span) {
+            self.expect(Ty::BOOL, right_ty, right.span);
         }
     }
 
     /// Checks `==` and `!=`, whose operands must have the same type and a value.
+    ///
+    /// An untyped operand takes the type of the other one, or `i64` when both are untyped.
     fn check_comparison(&mut self, expr: &Expr, left: &Expr, right: &Expr) {
         let left_ty = self.check_expr(left);
         let right_ty = self.check_expr(right);
-        if let (Ty::Known(left_known), Ty::Known(right_known)) = (left_ty, right_ty) {
-            let comparable = left_known == right_known && left_known != TypeId::UNIT;
-            if !comparable {
-                let left_name = self.type_name(left_known);
-                let right_name = self.type_name(right_known);
-                let message = format!("cannot compare `{left_name}` with `{right_name}`");
-                self.error(message, expr.span);
-            }
+        let (Ty::Known(left_known), Ty::Known(right_known)) = (left_ty, right_ty) else {
+            return;
+        };
+
+        if left_ty == Ty::UNTYPED && right_ty == Ty::UNTYPED {
+            self.settle(left, TypeId::I64);
+            self.settle(right, TypeId::I64);
+        } else if left_ty == Ty::UNTYPED && self.is_integer(right_known) {
+            self.settle(left, right_known);
+        } else if right_ty == Ty::UNTYPED && self.is_integer(left_known) {
+            self.settle(right, left_known);
+        } else if left_known != right_known || left_known == TypeId::UNIT {
+            let left_name = self.type_name(left_known);
+            let right_name = self.type_name(right_known);
+            let message = format!("cannot compare `{left_name}` with `{right_name}`");
+            self.error(message, expr.span);
         }
     }
 
     /// Checks a call to a local, a user function or `print`.
     fn check_call(&mut self, expr: &Expr, callee: &Ident, args: &[Expr]) -> Ty {
         // The arguments are checked first so their errors and reads count even if the call is bad.
-        let mut arguments = Vec::new();
+        let mut arg_types = Vec::new();
         for arg in args {
-            let ty = self.check_expr(arg);
-            arguments.push(Argument { ty, span: arg.span });
+            arg_types.push(self.check_expr(arg));
         }
 
         let name = callee.name.as_str();
@@ -822,7 +1014,7 @@ impl Checker {
         // A function wins over a local of the same name: that clash is reported where the local is declared.
         if let Some((param_count, ret)) = self.function_shape(name) {
             self.record_binding(expr.id, Binding::Function(name.to_string()));
-            self.check_user_call(name, param_count, expr.span, &arguments);
+            self.check_user_call(name, param_count, expr.span, args, &arg_types);
             return ret;
         }
 
@@ -834,7 +1026,7 @@ impl Checker {
 
         if name == PRINT {
             self.record_binding(expr.id, Binding::Print);
-            self.check_print_call(expr.span, &arguments);
+            self.check_print_call(expr.span, args, &arg_types);
             return Ty::UNIT;
         }
 
@@ -855,31 +1047,38 @@ impl Checker {
     }
 
     /// Checks the arguments of a call to a user function against its signature.
+    ///
+    /// `arg_types[i]` is the type of `args[i]`.
     fn check_user_call(
         &mut self,
         name: &str,
         param_count: usize,
         span: Span,
-        arguments: &[Argument],
+        args: &[Expr],
+        arg_types: &[Ty],
     ) {
-        if !self.check_arity(name, param_count, arguments.len(), span) {
+        if !self.check_arity(name, param_count, args.len(), span) {
             return;
         }
-        for (index, argument) in arguments.iter().enumerate() {
+        for (index, (arg, arg_ty)) in args.iter().zip(arg_types).enumerate() {
             if let Some(expected) = self.param_type(name, index) {
-                self.expect(expected, argument.ty, argument.span);
+                self.expect_expr(expected, *arg_ty, arg);
             }
         }
     }
 
-    /// Checks the argument of `print`, which can show an `i64` or a `bool`.
-    fn check_print_call(&mut self, span: Span, arguments: &[Argument]) {
-        if !self.check_arity(PRINT, 1, arguments.len(), span) {
+    /// Checks the argument of `print`, which can show any integer or a `bool`.
+    ///
+    /// `arg_types[i]` is the type of `args[i]`.
+    fn check_print_call(&mut self, span: Span, args: &[Expr], arg_types: &[Ty]) {
+        if !self.check_arity(PRINT, 1, args.len(), span) {
             return;
         }
-        for argument in arguments {
-            if argument.ty == Ty::UNIT {
-                self.error("`print` expects `i64` or `bool`, found `()`", argument.span);
+        for (arg, arg_ty) in args.iter().zip(arg_types) {
+            if *arg_ty == Ty::UNIT {
+                self.error("`print` cannot show `()`", arg.span);
+            } else {
+                self.settle_to_default(arg, *arg_ty);
             }
         }
     }

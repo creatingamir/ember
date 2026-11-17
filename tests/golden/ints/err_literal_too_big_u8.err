@@ -1,0 +1,3 @@
+ints/err_literal_too_big_u8.em:2:13: error: integer literal does not fit in `u8`
+        x: u8 = 256
+                ^

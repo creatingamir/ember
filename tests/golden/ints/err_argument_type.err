@@ -1,0 +1,3 @@
+ints/err_argument_type.em:7:10: error: expected `u8`, found `i64`
+        take(wide)
+             ^

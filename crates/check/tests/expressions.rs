@@ -291,7 +291,7 @@ fn print_without_arguments_is_rejected_at_the_call() {
 #[test]
 fn print_of_unit_is_rejected_at_the_argument() {
     let src = with_noop("    print(noop())");
-    let message = "`print` expects `i64` or `bool`, found `()`";
+    let message = "`print` cannot show `()`";
     assert_single_error(&src, message, "noop()", 1);
 }
 
@@ -737,7 +737,7 @@ fn main() {
     print(quiet(1))
 }
 ";
-    let message = "`print` expects `i64` or `bool`, found `()`";
+    let message = "`print` cannot show `()`";
     assert_single_error(src, message, "quiet(1)", 0);
 }
 

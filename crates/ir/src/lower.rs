@@ -744,17 +744,13 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    /// Lowers an integer literal; the checker keeps literals within `i64`.
-    fn lower_int(&mut self, expr: &Expr, value: u64) -> Temp {
-        let value = match i64::try_from(value) {
-            Ok(value) => value,
-            Err(_) => {
-                self.internal_error(expr.span, "an integer literal does not fit in `i64`");
-                i64::MAX
-            }
-        };
+    /// Lowers an integer literal; the checker keeps every literal within the range of its type.
+    fn lower_int(&mut self, expr: &Expr, magnitude: u64) -> Temp {
         let value_type = self.expr_type(expr);
-        self.emit_const(value, value_type.ty)
+        if !literal_fits(magnitude, value_type) {
+            self.internal_error(expr.span, "an integer literal does not fit its type");
+        }
+        self.emit_const(bit_pattern(magnitude), value_type.ty)
     }
 
     /// Lowers a read of a variable.
@@ -785,15 +781,18 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    /// Lowers `-e`; the literal `-9223372036854775808` is a single constant.
+    /// Lowers `-e`; the smallest value of a signed type, such as `-128` for `i8`, is a single constant.
     fn lower_neg(&mut self, expr: &Expr, operand: &Expr) -> Temp {
-        if operand.kind == ExprKind::Int(i64::MIN.unsigned_abs()) {
-            let value_type = self.expr_type(expr);
-            return self.emit_const(i64::MIN, value_type.ty);
+        let value_type = self.expr_type(expr);
+        if let ExprKind::Int(magnitude) = &operand.kind
+            && value_type.sign == Sign::Signed
+            && *magnitude == min_magnitude(value_type.ty)
+        {
+            let value = bit_pattern(*magnitude).wrapping_neg();
+            return self.emit_const(value, value_type.ty);
         }
 
         let src = self.lower_expr(operand);
-        let value_type = self.expr_type(expr);
         let dst = self.new_temp(value_type.ty);
         let loc = self.loc(expr.span);
         self.emit(Inst::Neg { dst, src, loc });
@@ -921,10 +920,8 @@ impl<'a> FunctionLowering<'a> {
             return PrintKind::I64;
         };
         match self.checked.types.kind(id) {
-            TypeKind::Int {
-                bits: 64,
-                signed: true,
-            } => PrintKind::I64,
+            TypeKind::Int { signed: true, .. } => PrintKind::I64,
+            TypeKind::Int { signed: false, .. } => PrintKind::U64,
             TypeKind::Bool => PrintKind::Bool,
             _ => {
                 self.internal_error(arg.span, "the type of a printed value is unknown");
@@ -932,6 +929,25 @@ impl<'a> FunctionLowering<'a> {
             }
         }
     }
+}
+
+/// The `i64` that holds the bits of a literal; a `u64` above `i64::MAX` becomes its two's complement.
+fn bit_pattern(magnitude: u64) -> i64 {
+    magnitude.cast_signed()
+}
+
+/// The magnitude of the smallest value of a signed type: 128 for `i8`, 2^63 for `i64`.
+fn min_magnitude(ty: IrType) -> u64 {
+    1 << (ty.bits() - 1)
+}
+
+/// Tells whether a literal that is not under a minus sign is a value of the type.
+fn literal_fits(magnitude: u64, value_type: ValueType) -> bool {
+    let largest = match value_type.sign {
+        Sign::Signed => min_magnitude(value_type.ty) - 1,
+        Sign::Unsigned => u64::MAX >> (64 - value_type.ty.bits()),
+    };
+    magnitude <= largest
 }
 
 /// Returns the operation of a compound assignment on operands of signedness `sign`, or `None` for a plain `=` (and for `@=`).

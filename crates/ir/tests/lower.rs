@@ -1742,3 +1742,624 @@ fn typed_ir_text_is_deterministic() {
     ]);
     assert_eq!(ir_text(&source), ir_text(&source));
 }
+
+// ---------------------------------------------------------------- M2.2c: the eight integer types
+
+/// How lowering shows one source integer type.
+struct IntCase {
+    /// The source spelling, such as `u8`.
+    name: &'static str,
+    /// The IR type: signless, so `u8` and `i8` are both `i8`.
+    ir: &'static str,
+    /// The slot size in bytes.
+    size: u32,
+    /// The extension suffix of a load or a parameter: `.s` or `.u` for 8 and 16 bits, nothing above.
+    extension: &'static str,
+    /// The sign suffix of an operation: `s` or `u`.
+    sign: &'static str,
+    /// The print instruction for the type, such as `print.u64`.
+    print: &'static str,
+}
+
+/// All eight integer types, with how lowering shows each.
+const INT_CASES: [IntCase; 8] = [
+    IntCase {
+        name: "i8",
+        ir: "i8",
+        size: 1,
+        extension: ".s",
+        sign: "s",
+        print: "print.i64",
+    },
+    IntCase {
+        name: "i16",
+        ir: "i16",
+        size: 2,
+        extension: ".s",
+        sign: "s",
+        print: "print.i64",
+    },
+    IntCase {
+        name: "i32",
+        ir: "i32",
+        size: 4,
+        extension: "",
+        sign: "s",
+        print: "print.i64",
+    },
+    IntCase {
+        name: "i64",
+        ir: "i64",
+        size: 8,
+        extension: "",
+        sign: "s",
+        print: "print.i64",
+    },
+    IntCase {
+        name: "u8",
+        ir: "i8",
+        size: 1,
+        extension: ".u",
+        sign: "u",
+        print: "print.u64",
+    },
+    IntCase {
+        name: "u16",
+        ir: "i16",
+        size: 2,
+        extension: ".u",
+        sign: "u",
+        print: "print.u64",
+    },
+    IntCase {
+        name: "u32",
+        ir: "i32",
+        size: 4,
+        extension: "",
+        sign: "u",
+        print: "print.u64",
+    },
+    IntCase {
+        name: "u64",
+        ir: "i64",
+        size: 8,
+        extension: "",
+        sign: "u",
+        print: "print.u64",
+    },
+];
+
+/// Checks `fn f(a: T, b: T) -> R { return a OP b }` for one type, operator and result type.
+///
+/// `mnemonic` includes the sign suffix and `suffix` is the expected location text.
+fn assert_typed_operator(
+    case: &IntCase,
+    symbol: &str,
+    mnemonic: &str,
+    result: (&str, &str),
+    suffix: &str,
+) {
+    let (result_name, result_ir) = result;
+    let header = format!("fn f(a: {0}, b: {0}) -> {result_name} {{", case.name);
+    let statement = format!("    return a {symbol} b");
+    let source = text(&[&header, &statement, "}", "fn main() {", "}"]);
+
+    let (ir, extension, size) = (case.ir, case.extension, case.size);
+    let expected = text(&[
+        &format!("fn f(a:{ir}{extension}, b:{ir}{extension}) -> {result_ir} {{"),
+        &format!("  slots: a:{size}, b:{size}"),
+        "bb0:",
+        &format!("  t0:{ir} = load{extension} a"),
+        &format!("  t1:{ir} = load{extension} b"),
+        &format!("  t2:{result_ir} = {mnemonic} t0, t1{suffix}"),
+        "  ret t2",
+        "}",
+    ]);
+    assert_eq!(
+        function_ir(&source, "f"),
+        expected,
+        "{} {symbol}",
+        case.name
+    );
+}
+
+/// Checks `x OP= 3` after `x: u8 = 10`; the operation sits at the statement start.
+fn assert_narrow_compound_assign(symbol: &str, mnemonic: &str) {
+    let statement = format!("    x {symbol} 3");
+    let actual = main_ir(&[
+        "fn main() {",
+        "    x: u8 = 10",
+        &statement,
+        "    print(x)",
+        "}",
+    ]);
+    let operation = format!("  t3:i8 = {mnemonic} t1, t2 @3:5");
+    let expected = text(&[
+        "fn main() {",
+        "  slots: x:1",
+        "bb0:",
+        "  t0:i8 = const 10",
+        "  store x, t0",
+        "  t1:i8 = load.u x",
+        "  t2:i8 = const 3",
+        &operation,
+        "  store x, t3",
+        "  t4:i8 = load.u x",
+        "  print.u64 t4",
+        "  ret",
+        "}",
+    ]);
+    assert_eq!(actual, expected, "operator {symbol}");
+}
+
+/// The spec's `fn f(n: u8) -> u8` example prints exactly: unsigned load and unsigned add.
+#[test]
+fn unsigned_byte_function_prints_in_full() {
+    let source = text(&[
+        "fn f(n: u8) -> u8 {",
+        "    return n + 1",
+        "}",
+        "fn main() {",
+        "}",
+    ]);
+    let expected = text(&[
+        "fn f(n:i8.u) -> i8 {",
+        "  slots: n:1",
+        "bb0:",
+        "  t0:i8 = load.u n",
+        "  t1:i8 = const 1",
+        "  t2:i8 = add.u t0, t1 @2:12",
+        "  ret t2",
+        "}",
+    ]);
+    assert_eq!(function_ir(&source, "f"), expected);
+}
+
+/// A local of each type has a slot of its size, a typed const and a load with its own extension.
+#[test]
+fn local_of_each_type_has_its_size_const_and_load() {
+    for case in &INT_CASES {
+        let statement = format!("    x: {} = 1", case.name);
+        let actual = main_ir(&["fn main() {", &statement, "    print(x)", "}"]);
+        let (ir, extension) = (case.ir, case.extension);
+        let expected = text(&[
+            "fn main() {",
+            &format!("  slots: x:{}", case.size),
+            "bb0:",
+            &format!("  t0:{ir} = const 1"),
+            "  store x, t0",
+            &format!("  t1:{ir} = load{extension} x"),
+            &format!("  {} t1", case.print),
+            "  ret",
+            "}",
+        ]);
+        assert_eq!(actual, expected, "{}", case.name);
+    }
+}
+
+/// `print` of an unsigned type lowers to `print.u64` and of a signed type to `print.i64`.
+#[test]
+fn print_kind_follows_the_signedness_of_the_type() {
+    for case in &INT_CASES {
+        let statement = format!("    x: {} = 1", case.name);
+        let output = main_ir(&["fn main() {", &statement, "    print(x)", "}"]);
+        let line = format!("  {} t1\n", case.print);
+        assert!(output.contains(&line), "{}: {output}", case.name);
+    }
+}
+
+/// `print` of an `i16` is `print.i64` and of a `u32` is `print.u64`, as the spec lists.
+#[test]
+fn print_of_i16_and_u32_use_the_spec_kinds() {
+    let signed = main_ir(&["fn main() {", "    x: i16 = 5", "    print(x)", "}"]);
+    assert!(signed.contains("  print.i64 t1\n"), "{signed}");
+    let unsigned = main_ir(&["fn main() {", "    x: u32 = 5", "    print(x)", "}"]);
+    assert!(unsigned.contains("  print.u64 t1\n"), "{unsigned}");
+}
+
+/// `print` of a `bool` stays `print.bool`.
+#[test]
+fn print_of_a_bool_variable_stays_print_bool() {
+    let output = main_ir(&["fn main() {", "    x: bool = true", "    print(x)", "}"]);
+    assert!(output.contains("  print.bool t1\n"), "{output}");
+}
+
+/// `x: u64 = 18446744073709551615` is one const holding the bit pattern, printed as `-1`.
+#[test]
+fn u64_max_literal_is_a_const_of_minus_one() {
+    let expected = text(&[
+        "fn main() {",
+        "  slots: x:8",
+        "bb0:",
+        "  t0:i64 = const -1",
+        "  store x, t0",
+        "  t1:i64 = load x",
+        "  print.u64 t1",
+        "  ret",
+        "}",
+    ]);
+    let actual = main_ir(&[
+        "fn main() {",
+        "    x: u64 = 18446744073709551615",
+        "    print(x)",
+        "}",
+    ]);
+    assert_eq!(actual, expected);
+}
+
+/// A `u64` literal just above `i64::MAX` is a const holding `i64::MIN`'s bit pattern.
+#[test]
+fn u64_literal_above_i64_max_is_a_const_of_i64_min() {
+    let output = main_ir(&[
+        "fn main() {",
+        "    x: u64 = 9223372036854775808",
+        "    print(x)",
+        "}",
+    ]);
+    assert!(
+        output.contains("  t0:i64 = const -9223372036854775808\n"),
+        "{output}"
+    );
+}
+
+/// The largest value of a narrower unsigned type is a const of its own value, not sign-extended.
+#[test]
+fn narrow_unsigned_max_literals_are_consts_of_their_value() {
+    let table = [
+        ("u8", "i8", "255"),
+        ("u16", "i16", "65535"),
+        ("u32", "i32", "4294967295"),
+    ];
+    for (name, ir, max) in table {
+        let statement = format!("    x: {name} = {max}");
+        let output = main_ir(&["fn main() {", &statement, "    print(x)", "}"]);
+        let line = format!("  t0:{ir} = const {max}\n");
+        assert!(output.contains(&line), "{name}: {output}");
+    }
+}
+
+/// `x: i8 = -128` is one `const -128` and no `neg`.
+#[test]
+fn negated_i8_min_literal_is_one_const() {
+    let expected = text(&[
+        "fn main() {",
+        "  slots: x:1",
+        "bb0:",
+        "  t0:i8 = const -128",
+        "  store x, t0",
+        "  t1:i8 = load.s x",
+        "  print.i64 t1",
+        "  ret",
+        "}",
+    ]);
+    let actual = main_ir(&["fn main() {", "    x: i8 = -128", "    print(x)", "}"]);
+    assert_eq!(actual, expected);
+}
+
+/// `x: i8 = -5` is `const 5` followed by `neg` at the minus sign.
+#[test]
+fn negated_ordinary_i8_literal_is_const_then_neg() {
+    let expected = text(&[
+        "fn main() {",
+        "  slots: x:1",
+        "bb0:",
+        "  t0:i8 = const 5",
+        "  t1:i8 = neg t0 @2:13",
+        "  store x, t1",
+        "  t2:i8 = load.s x",
+        "  print.i64 t2",
+        "  ret",
+        "}",
+    ]);
+    let actual = main_ir(&["fn main() {", "    x: i8 = -5", "    print(x)", "}"]);
+    assert_eq!(actual, expected);
+}
+
+/// The smallest value of every signed type is a single const, with no `neg`.
+#[test]
+fn signed_min_literals_are_single_consts() {
+    let table = [
+        ("i8", "-128"),
+        ("i16", "-32768"),
+        ("i32", "-2147483648"),
+        ("i64", "-9223372036854775808"),
+    ];
+    for (name, min) in table {
+        let statement = format!("    x: {name} = {min}");
+        let output = main_ir(&["fn main() {", &statement, "    print(x)", "}"]);
+        let line = format!(":{name} = const {min}\n");
+        assert!(output.contains(&line), "{name}: {output}");
+        assert!(!output.contains(" neg "), "{name}: {output}");
+    }
+}
+
+/// An untyped sum settled to `i16` lowers every node as `i16`.
+#[test]
+fn untyped_sum_lowers_in_the_settled_type() {
+    let expected = text(&[
+        "fn main() {",
+        "  slots: x:2",
+        "bb0:",
+        "  t0:i16 = const 7",
+        "  t1:i16 = const 6",
+        "  t2:i16 = mul.s t0, t1 @2:14",
+        "  store x, t2",
+        "  t3:i16 = load.s x",
+        "  print.i64 t3",
+        "  ret",
+        "}",
+    ]);
+    let actual = main_ir(&["fn main() {", "    x: i16 = 7 * 6", "    print(x)", "}"]);
+    assert_eq!(actual, expected);
+}
+
+/// A literal returned from a `u8` function is an `i8` const.
+#[test]
+fn returned_literal_is_a_const_of_the_return_type() {
+    let source = text(&["fn f() -> u8 {", "    return 200", "}", "fn main() {", "}"]);
+    let expected = text(&[
+        "fn f() -> i8 {",
+        "  slots:",
+        "bb0:",
+        "  t0:i8 = const 200",
+        "  ret t0",
+        "}",
+    ]);
+    assert_eq!(function_ir(&source, "f"), expected);
+}
+
+/// `+ - * / %` take `.s` for signed types and `.u` for unsigned types, with their location.
+#[test]
+fn arithmetic_takes_its_sign_from_the_operand_type() {
+    for case in &INT_CASES {
+        for (symbol, name) in [
+            ("+", "add"),
+            ("-", "sub"),
+            ("*", "mul"),
+            ("/", "div"),
+            ("%", "rem"),
+        ] {
+            let mnemonic = format!("{name}.{}", case.sign);
+            let result = (case.name, case.ir);
+            assert_typed_operator(case, symbol, &mnemonic, result, " @2:12");
+        }
+    }
+}
+
+/// `< <= > >=` take `.s` or `.u`, give an `i8` and carry no location.
+#[test]
+fn ordering_takes_its_sign_from_the_operand_type() {
+    for case in &INT_CASES {
+        for (symbol, name) in [("<", "lt"), ("<=", "le"), (">", "gt"), (">=", "ge")] {
+            let mnemonic = format!("{name}.{}", case.sign);
+            assert_typed_operator(case, symbol, &mnemonic, ("bool", "i8"), "");
+        }
+    }
+}
+
+/// `==` and `!=` print no sign for any type, and give an `i8`.
+#[test]
+fn equality_prints_no_sign_for_any_type() {
+    for case in &INT_CASES {
+        for (symbol, mnemonic) in [("==", "eq"), ("!=", "ne")] {
+            assert_typed_operator(case, symbol, mnemonic, ("bool", "i8"), "");
+        }
+    }
+}
+
+/// Unary minus of a signed narrow value loads with extension and negates at the minus sign.
+#[test]
+fn negating_a_signed_value_prints_neg_in_its_type() {
+    for case in INT_CASES.iter().filter(|case| case.sign == "s") {
+        let header = format!("fn f(a: {0}) -> {0} {{", case.name);
+        let source = text(&[&header, "    return -a", "}", "fn main() {", "}"]);
+        let (ir, extension, size) = (case.ir, case.extension, case.size);
+        let expected = text(&[
+            &format!("fn f(a:{ir}{extension}) -> {ir} {{"),
+            &format!("  slots: a:{size}"),
+            "bb0:",
+            &format!("  t0:{ir} = load{extension} a"),
+            &format!("  t1:{ir} = neg t0 @2:12"),
+            "  ret t1",
+            "}",
+        ]);
+        assert_eq!(function_ir(&source, "f"), expected, "{}", case.name);
+    }
+}
+
+/// Compound assignment on a `u8` loads with extension and uses the unsigned operation.
+#[test]
+fn compound_assignment_on_a_byte_is_unsigned() {
+    let table = [
+        ("+=", "add.u"),
+        ("-=", "sub.u"),
+        ("*=", "mul.u"),
+        ("/=", "div.u"),
+    ];
+    for (symbol, mnemonic) in table {
+        assert_narrow_compound_assign(symbol, mnemonic);
+    }
+}
+
+/// A function with parameters of every width prints each parameter with its type, extension and slot size.
+#[test]
+fn parameters_of_mixed_widths_print_their_types_and_sizes() {
+    let source = text(&[
+        "fn mix(a: i8, b: u16, c: i32, d: u64) -> i64 {",
+        "    return 0",
+        "}",
+        "fn main() {",
+        "}",
+    ]);
+    let expected = text(&[
+        "fn mix(a:i8.s, b:i16.u, c:i32, d:i64) -> i64 {",
+        "  slots: a:1, b:2, c:4, d:8",
+        "bb0:",
+        "  t0:i64 = const 0",
+        "  ret t0",
+        "}",
+    ]);
+    assert_eq!(function_ir(&source, "mix"), expected);
+}
+
+/// A call passes typed temps and its result has the callee's return type.
+#[test]
+fn call_with_narrow_argument_and_wide_result_is_typed() {
+    let source = text(&[
+        "fn widen(a: u8) -> u32 {",
+        "    return 1",
+        "}",
+        "fn main() {",
+        "    print(widen(5))",
+        "}",
+    ]);
+    let expected = text(&[
+        "fn main() {",
+        "  slots:",
+        "bb0:",
+        "  t0:i8 = const 5",
+        "  t1:i32 = call widen(t0)",
+        "  print.u64 t1",
+        "  ret",
+        "}",
+    ]);
+    assert_eq!(function_ir(&source, "main"), expected);
+}
+
+/// The source of a `u8` inclusive range loop over `n`.
+const U8_INCLUSIVE_LOOP: [&str; 6] = [
+    "fn main() {",
+    "    n: u8 = 255",
+    "    for i in 0..=n {",
+    "        print(i)",
+    "    }",
+    "}",
+];
+
+/// `for i in 0..=n` with `n: u8` prints in full: byte slots, unsigned loads, `le.u`, `eq`, `add.u`.
+#[test]
+fn inclusive_byte_range_loop_prints_in_full() {
+    let expected = text(&[
+        "fn main() {",
+        "  slots: n:1, i:1, $end:1",
+        "bb0:",
+        "  t0:i8 = const 255",
+        "  store n, t0",
+        "  t1:i8 = const 0",
+        "  store i, t1",
+        "  t2:i8 = load.u n",
+        "  store $end, t2",
+        "  jump bb1",
+        "bb1:",
+        "  t3:i8 = load.u i",
+        "  t4:i8 = load.u $end",
+        "  t5:i8 = le.u t3, t4",
+        "  br t5, bb2, bb4",
+        "bb2:",
+        "  t6:i8 = load.u i",
+        "  print.u64 t6",
+        "  jump bb3",
+        "bb3:",
+        "  t7:i8 = load.u i",
+        "  t8:i8 = load.u $end",
+        "  t9:i8 = eq t7, t8",
+        "  br t9, bb4, bb5",
+        "bb4:",
+        "  ret",
+        "bb5:",
+        "  t10:i8 = load.u i",
+        "  t11:i8 = const 1",
+        "  t12:i8 = add.u t10, t11 @3:5",
+        "  store i, t12",
+        "  jump bb1",
+        "}",
+    ]);
+    assert_eq!(main_ir(&U8_INCLUSIVE_LOOP), expected);
+}
+
+/// The `$end` slot of a `u8` range loop is one byte, like the loop variable.
+#[test]
+fn byte_range_loop_end_slot_is_one_byte() {
+    let output = main_ir(&U8_INCLUSIVE_LOOP);
+    assert!(output.contains("  slots: n:1, i:1, $end:1\n"), "{output}");
+}
+
+/// The step of a `u8` range loop adds an `i8` const 1 with `add.u`.
+#[test]
+fn byte_range_loop_step_is_an_unsigned_add_of_a_byte_one() {
+    let output = main_ir(&U8_INCLUSIVE_LOOP);
+    let lines: Vec<&str> = output.lines().collect();
+    let add = lines
+        .iter()
+        .position(|line| line.contains("= add.u "))
+        .unwrap();
+    assert!(lines[add].contains(":i8 = add.u "), "{}", lines[add]);
+    assert!(
+        lines[add - 1].ends_with(":i8 = const 1"),
+        "{}",
+        lines[add - 1]
+    );
+}
+
+/// An inclusive `u8` range loop compares with `le.u` and tests `eq` before stepping.
+#[test]
+fn byte_range_loop_compares_unsigned_and_tests_equality_first() {
+    let output = main_ir(&U8_INCLUSIVE_LOOP);
+    assert!(output.contains(":i8 = le.u "), "{output}");
+    assert!(output.contains(":i8 = eq t"), "{output}");
+    assert!(!output.contains("le.s"), "{output}");
+}
+
+/// An exclusive `i16` range loop compares with `lt.s` and steps with `add.s`, in two-byte slots.
+#[test]
+fn signed_short_range_loop_uses_signed_operations() {
+    let output = main_ir(&[
+        "fn main() {",
+        "    a: i16 = -3",
+        "    b: i16 = 3",
+        "    for i in a..b {",
+        "        print(i)",
+        "    }",
+        "}",
+    ]);
+    assert!(
+        output.contains("  slots: a:2, b:2, i:2, $end:2\n"),
+        "{output}"
+    );
+    assert!(output.contains(":i8 = lt.s "), "{output}");
+    assert!(output.contains(":i16 = add.s "), "{output}");
+    assert!(output.contains(":i16 = load.s i\n"), "{output}");
+}
+
+/// An exclusive `u32` range loop compares with `lt.u` and steps with `add.u`, in four-byte slots.
+#[test]
+fn unsigned_word_range_loop_uses_unsigned_operations() {
+    let output = main_ir(&[
+        "fn main() {",
+        "    n: u32 = 3",
+        "    for i in 0..n {",
+        "        print(i)",
+        "    }",
+        "}",
+    ]);
+    assert!(output.contains("  slots: n:4, i:4, $end:4\n"), "{output}");
+    assert!(output.contains(":i8 = lt.u "), "{output}");
+    assert!(output.contains(":i32 = add.u "), "{output}");
+}
+
+/// No lowered temp of an integer program lacks a type.
+#[test]
+fn every_temp_of_an_integer_program_has_a_type() {
+    let output = ir_text(&text(&[
+        "fn f(a: u8, b: i16) -> u32 {",
+        "    return 7",
+        "}",
+        "fn main() {",
+        "    n: u16 = 4",
+        "    for i in 0..=n {",
+        "        print(f(1, -2) + 3)",
+        "    }",
+        "}",
+    ]));
+    assert!(!output.contains(":?"), "{output}");
+}

@@ -1,0 +1,4 @@
+fn main() {
+    x: u8 = 256
+    print(x)
+}
