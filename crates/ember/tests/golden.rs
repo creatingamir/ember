@@ -11,11 +11,21 @@ fn suite_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden")
 }
 
-/// Runs `ember run` on the case's source and captures what it produced.
+/// Runs `ember run` on the case's source from inside the suite directory and captures what it produced.
+///
+/// The working directory is the suite directory, so diagnostics and panics show just `NAME.em`
+/// and the expectation files do not depend on where the repository is checked out.
 fn run_case(case: &Case) -> Result<Outcome, Failed> {
+    let suite = suite_dir();
+    let relative_source = case
+        .source
+        .strip_prefix(&suite)
+        .map_err(|error| Failed::from(format!("case outside the suite directory: {error}")))?;
+
     let output = Command::new(env!("CARGO_BIN_EXE_ember"))
+        .current_dir(&suite)
         .arg("run")
-        .arg(&case.source)
+        .arg(relative_source)
         .output()
         .map_err(|error| Failed::from(format!("could not start ember: {error}")))?;
 

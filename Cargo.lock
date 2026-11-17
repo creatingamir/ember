@@ -128,9 +128,16 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 name = "ember"
 version = "0.1.0"
 dependencies = [
+ "arm64",
+ "ast",
+ "check",
  "clap",
  "golden",
+ "ir",
+ "lexer",
  "libtest-mimic",
+ "parser",
+ "source",
 ]
 
 [[package]]

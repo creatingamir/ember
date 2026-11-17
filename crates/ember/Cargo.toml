@@ -6,7 +6,14 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+arm64 = { path = "../arm64", version = "0.1.0" }
+ast = { path = "../ast", version = "0.1.0" }
+check = { path = "../check", version = "0.1.0" }
 clap.workspace = true
+ir = { path = "../ir", version = "0.1.0" }
+lexer = { path = "../lexer", version = "0.1.0" }
+parser = { path = "../parser", version = "0.1.0" }
+source = { path = "../source", version = "0.1.0" }
 
 [dev-dependencies]
 golden = { path = "../golden", version = "0.1.0" }
