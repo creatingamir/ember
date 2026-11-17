@@ -1,0 +1,9 @@
+//! The Ember intermediate representation: its types and a text printer.
+
+mod print;
+mod types;
+
+pub use print::print_module;
+pub use types::{
+    BinOp, Block, BlockId, Function, Inst, Loc, Module, PrintKind, Slot, SlotId, Temp, Terminator,
+};
