@@ -60,6 +60,7 @@ fn print_inst(asm: &mut Asm, inst: &MInst, frame_size: u64) -> Result<(), Diagno
         MInst::B { target } => asm.inst(&format!("b {target}")),
         MInst::BCond { cond, target } => asm.inst(&format!("b.{} {target}", condition(*cond))),
         MInst::Cbnz { reg, target } => asm.inst(&format!("cbnz {}, {target}", name(*reg)?)),
+        MInst::Cbz { reg, target } => asm.inst(&format!("cbz {}, {target}", name(*reg)?)),
         MInst::PanicIf { cond, target } => {
             asm.inst(&format!("b.{} {target}", condition(*cond)));
         }
@@ -137,6 +138,7 @@ fn condition(cond: Cond) -> &'static str {
         Cond::Gt => "gt",
         Cond::Ge => "ge",
         Cond::Vs => "vs",
+        Cond::Vc => "vc",
     }
 }
 
@@ -217,7 +219,11 @@ mod tests {
                 cond: Cond::Vs,
                 target: label.clone(),
             },
-            MInst::Cbnz { reg, target: label },
+            MInst::Cbnz {
+                reg,
+                target: label.clone(),
+            },
+            MInst::Cbz { reg, target: label },
             MInst::Bl {
                 symbol: "f".to_string(),
                 args: 2,

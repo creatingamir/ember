@@ -18,6 +18,7 @@ pub fn select(function: &Function) -> Result<MFunction, Diagnostic> {
         name: function.name.clone(),
         slot_count: function.slots.len() as u32,
         vreg_count: selector.next_vreg,
+        next_label: selector.next_label,
         insts: selector.insts,
         frame_size: 0,
     })

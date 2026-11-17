@@ -43,10 +43,6 @@ fn place(mem: Mem, slot_count: u32, vreg_count: u32) -> Result<Mem, Diagnostic> 
 }
 
 /// How many 4-byte machine instructions each MIR instruction prints as (branch relaxation needs exact sizes).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "branch relaxation (M2.1b) is the first caller")
-)]
 pub mod size_table {
     use super::{MAX_ACCESS_OFFSET, MAX_IMMEDIATE_FRAME};
     use crate::mir::{MInst, Mem};
@@ -85,6 +81,7 @@ pub mod size_table {
             | MInst::B { .. }
             | MInst::BCond { .. }
             | MInst::Cbnz { .. }
+            | MInst::Cbz { .. }
             | MInst::PanicIf { .. }
             | MInst::Bl { .. }
             | MInst::Brk => 1,

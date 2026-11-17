@@ -1,7 +1,7 @@
 //! The ARM64 back end: turns an IR module into assembly text for Apple Silicon macOS.
 //!
-//! Each function goes through four steps: instruction selection (IR to MIR with virtual registers),
-//! the naive allocator (every virtual register gets a stack cell), frame layout, and printing.
+//! Each function goes through five steps: instruction selection (IR to MIR with virtual registers),
+//! the naive allocator (every virtual register gets a stack cell), frame layout, branch relaxation, and printing.
 
 mod asm;
 mod frame;
@@ -9,6 +9,7 @@ mod isel;
 mod mir;
 mod naive;
 mod print;
+mod relax;
 mod runtime;
 mod strings;
 
@@ -30,10 +31,11 @@ pub fn emit(module: &ir::Module, file_name: &str) -> Result<String, Diagnostic> 
     Ok(asm.finish())
 }
 
-/// Writes one function by running it through the four steps.
+/// Writes one function by running it through the five steps.
 fn emit_function(asm: &mut Asm, function: &ir::Function) -> Result<(), Diagnostic> {
     let selected = isel::select(function)?;
     let allocated = naive::allocate(selected)?;
     let laid_out = frame::lay_out(allocated)?;
-    print::print(asm, &laid_out)
+    let relaxed = relax::relax(laid_out)?;
+    print::print(asm, &relaxed)
 }

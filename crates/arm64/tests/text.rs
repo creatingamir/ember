@@ -5,9 +5,13 @@
 
 mod common;
 
-use common::{FILE, asm, asm_named, emit_ok, main_with, program};
+use common::{
+    FILE, asm, asm_named, binary, block_of, constant, counter_program, emit_ok, main_module,
+    main_with, program, unreachable_blocks,
+};
 use ir::{BinOp, Block, BlockId, Function, Inst, Loc, Module, PrintKind, SlotId, Temp, Terminator};
 use source::Span;
+use std::sync::OnceLock;
 
 /// A recursive `fib` and a `main` that prints `fib(10)`.
 fn fib_program() -> String {
@@ -550,15 +554,6 @@ fn asm_of_huge_main(tail: &[&str]) -> String {
     asm(&main_with(&body))
 }
 
-/// A block with the given id, instructions and terminator.
-fn block_of(id: u32, insts: Vec<Inst>, term: Terminator) -> Block {
-    Block {
-        id: BlockId(id),
-        insts,
-        term,
-    }
-}
-
 /// A module with one function `main` that has no slots and the given blocks.
 fn module_of_blocks(returns_value: bool, blocks: Vec<Block>) -> Module {
     let mut module = module_of(vec![], Terminator::Return(None));
@@ -570,25 +565,6 @@ fn module_of_blocks(returns_value: bool, blocks: Vec<Block>) -> Module {
 /// Assembly for the module with one `main` block made of `insts` and `term`.
 fn asm_of_insts(insts: Vec<Inst>, term: Terminator) -> String {
     emit_ok(&module_of(insts, term), FILE)
-}
-
-/// A temp holding a constant, as an instruction.
-fn constant(temp: u32, value: i64) -> Inst {
-    Inst::Const {
-        dst: Temp(temp),
-        value,
-    }
-}
-
-/// A binary instruction on temps with a fixed source location.
-fn binary(dst: u32, op: BinOp, lhs: u32, rhs: u32) -> Inst {
-    Inst::Binary {
-        dst: Temp(dst),
-        op,
-        lhs: Temp(lhs),
-        rhs: Temp(rhs),
-        loc: Loc { line: 3, col: 5 },
-    }
 }
 
 /// The frame of `f(a, b)` with `*` has 6 cells: two slots, `t0`..`t2` and isel's `h`.
@@ -1268,4 +1244,399 @@ fn mul_into_the_largest_temp_is_an_internal_error() {
 fn const_into_the_largest_temp_is_an_internal_error() {
     let insts = vec![constant(u32::MAX, 1)];
     assert_internal_error(&module_of(insts, Terminator::Return(None)));
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2.1b: branch relaxation. A conditional branch reaches -1,048,576 ..= +1,048,572 bytes; beyond
+// that it becomes `b.<inverse> Lskip` / `b target` / `Lskip:` (`cbz` for `cbnz`).
+// ---------------------------------------------------------------------------------------------
+
+/// The farthest forward distance in bytes that a conditional branch encodes.
+const MAX_FORWARD: i64 = 1_048_572;
+
+/// The farthest backward distance in bytes that a conditional branch encodes.
+const MAX_BACKWARD: i64 = -1_048_576;
+
+/// Enough `Unreachable` blocks (one instruction each) to push any panic path out of range.
+const FAR_FILLERS: u32 = 262_200;
+
+/// How many `x += 1` statements the large program has: its first panic path is over 1 MiB away.
+const BIG_COUNT: usize = 20_000;
+
+/// Assembly of the 20,000-increment program, built once and shared by the tests that read it.
+fn big_asm() -> &'static str {
+    static ASM: OnceLock<String> = OnceLock::new();
+    ASM.get_or_init(|| asm(&counter_program("x := 0", BIG_COUNT)))
+}
+
+/// The body of `_em_main` in the large program, built once.
+fn big_main() -> &'static str {
+    static MAIN: OnceLock<String> = OnceLock::new();
+    MAIN.get_or_init(|| function_text(big_asm(), "_em_main"))
+}
+
+/// The lines of `_em_main` in the large program, trimmed.
+fn big_main_lines() -> Vec<&'static str> {
+    trimmed_lines(big_main())
+}
+
+/// True when `line` (trimmed) is a machine instruction: not a label and not a directive.
+fn is_instruction(line: &str) -> bool {
+    !line.is_empty() && !line.starts_with('.') && !line.ends_with(':')
+}
+
+/// The distance in bytes from the first line equal to `branch` to the line `label:`, one 4-byte step per printed instruction.
+fn distance_in_bytes(text: &str, branch: &str, label: &str) -> i64 {
+    let label_line = format!("{label}:");
+    let mut position = 0;
+    let mut branch_position = None;
+    let mut label_position = None;
+    for line in trimmed_lines(text) {
+        if line == branch && branch_position.is_none() {
+            branch_position = Some(position);
+        }
+        if line == label_line {
+            label_position = Some(position);
+        }
+        if is_instruction(line) {
+            position += 4;
+        }
+    }
+    let branch_position = branch_position.unwrap();
+    let label_position = label_position.unwrap();
+    label_position - branch_position
+}
+
+/// A `main` whose first block adds two constants, then returns; `fillers` unreachable blocks follow, then the panic path.
+fn add_then_fillers(fillers: u32) -> Module {
+    let mut blocks = vec![block_of(
+        0,
+        vec![constant(0, 1), constant(1, 1), binary(2, BinOp::Add, 0, 1)],
+        Terminator::Return(None),
+    )];
+    blocks.extend(unreachable_blocks(1, fillers));
+    main_module(blocks)
+}
+
+/// A `main` whose first block runs `insts` and returns, followed by `FAR_FILLERS` unreachable blocks.
+fn far_panic_module(insts: Vec<Inst>) -> Module {
+    let mut blocks = vec![block_of(0, insts, Terminator::Return(None))];
+    blocks.extend(unreachable_blocks(1, FAR_FILLERS));
+    main_module(blocks)
+}
+
+/// A `main` whose block 0 branches forward on a true condition to block `fillers + 1`, past `fillers` unreachable blocks.
+fn forward_branch_module(fillers: u32) -> Module {
+    let last = fillers + 1;
+    let branch = Terminator::Branch {
+        cond: Temp(0),
+        then_to: BlockId(last),
+        else_to: BlockId(1),
+    };
+    let mut blocks = vec![block_of(0, vec![constant(0, 1)], branch)];
+    blocks.extend(unreachable_blocks(1, fillers));
+    blocks.push(block_of(last, vec![], Terminator::Return(None)));
+    main_module(blocks)
+}
+
+/// A `main` that jumps to block 1, passes `fillers` more unreachable blocks, and branches back to block 1 on a true condition.
+fn backward_branch_module(fillers: u32) -> Module {
+    let branch_block = fillers + 2;
+    let end = fillers + 3;
+    let branch = Terminator::Branch {
+        cond: Temp(0),
+        then_to: BlockId(1),
+        else_to: BlockId(end),
+    };
+    let mut blocks = vec![block_of(0, vec![], Terminator::Jump(BlockId(1)))];
+    blocks.extend(unreachable_blocks(1, fillers + 1));
+    blocks.push(block_of(branch_block, vec![constant(0, 1)], branch));
+    blocks.push(block_of(end, vec![], Terminator::Return(None)));
+    main_module(blocks)
+}
+
+/// The first overflow check of the large program is relaxed: inverted branch over a jump to the panic path.
+#[test]
+fn big_program_first_check_is_relaxed() {
+    let lines = big_main_lines();
+    let adds = lines.iter().position(|line| *line == "adds x8, x8, x9");
+    assert!(adds.is_some(), "no `adds x8, x8, x9`");
+    let adds = adds.unwrap();
+    assert_eq!(
+        lines[adds + 1..adds + 4],
+        ["b.vc Lmain_skip20000", "b Lmain_panic0", "Lmain_skip20000:"]
+    );
+}
+
+/// The first relaxation label continues the counter after isel's 20,000 panic labels.
+#[test]
+fn big_program_numbers_skip_labels_after_the_panic_labels() {
+    assert!(big_asm().contains("Lmain_panic19999:"));
+    assert!(big_asm().contains("Lmain_skip20000:"));
+    assert!(!big_asm().contains("Lmain_skip19999:"));
+}
+
+/// The result of the relaxed first check is stored after the branch, as in an unrelaxed check.
+#[test]
+fn big_program_stores_the_sum_after_the_relaxed_branch() {
+    let lines = big_main_lines();
+    let label = lines.iter().position(|line| *line == "Lmain_skip20000:");
+    assert!(label.is_some(), "no `Lmain_skip20000:`");
+    assert!(
+        lines[label.unwrap() + 1].starts_with("str x8, [sp, #"),
+        "line after the skip label is `{}`",
+        lines[label.unwrap() + 1]
+    );
+}
+
+/// The last increment's panic path is within 1 MiB, so its check stays a plain `b.vs`.
+#[test]
+fn big_program_last_check_stays_short() {
+    let lines = big_main_lines();
+    assert!(lines.contains(&"b.vs Lmain_panic19999"));
+    assert!(!lines.contains(&"b Lmain_panic19999"));
+}
+
+/// Every relaxed branch of the large program is followed by a `b` to a panic path and then its own skip label.
+#[test]
+fn big_program_relaxed_branches_have_the_three_line_form() {
+    let lines = big_main_lines();
+    let mut relaxed = 0;
+    for (index, line) in lines.iter().enumerate() {
+        let Some(skip) = line.strip_prefix("b.vc ") else {
+            continue;
+        };
+        assert!(skip.starts_with("Lmain_skip"), "unexpected `{line}`");
+        assert!(
+            lines[index + 1].starts_with("b Lmain_panic"),
+            "after `{line}`"
+        );
+        assert_eq!(lines[index + 2], format!("{skip}:"));
+        relaxed += 1;
+    }
+    assert!(relaxed > 0, "no relaxed branch found");
+}
+
+/// Every skip label of the large program is defined exactly once.
+#[test]
+fn big_program_defines_each_skip_label_once() {
+    let lines = big_main_lines();
+    let mut seen = std::collections::HashSet::new();
+    for line in lines.iter().filter(|line| line.starts_with("Lmain_skip")) {
+        assert!(seen.insert(*line), "`{line}` defined twice");
+    }
+    assert!(!seen.is_empty());
+}
+
+/// The large program prints the same assembly on two separate compilations.
+#[test]
+fn big_program_output_is_deterministic() {
+    let again = asm(&counter_program("x := 0", BIG_COUNT));
+    assert!(big_asm() == again, "the two assemblies differ");
+}
+
+/// A relaxed module prints the same assembly twice.
+#[test]
+fn relaxed_module_output_is_deterministic() {
+    let module = far_panic_module(vec![
+        constant(0, 7),
+        constant(1, 0),
+        binary(2, BinOp::Div, 0, 1),
+    ]);
+    assert_eq!(emit_ok(&module, FILE), emit_ok(&module, FILE));
+}
+
+/// Programs under 1 MiB are never relaxed: no skip label, no inverted check, no `cbz`.
+#[test]
+fn programs_under_1_mib_are_not_relaxed() {
+    let everything = program(&[
+        "fn f(a: i64, b: i64) -> i64 {",
+        "    if a < b {",
+        "        return a * b - a / b + a % b",
+        "    }",
+        "    return -a",
+        "}",
+        "fn main() {",
+        "    for i in 0..10 {",
+        "        print(f(i, 3))",
+        "    }",
+        "}",
+    ]);
+    let mut huge = vec!["i := 7".to_string()];
+    huge.extend((0..4200).map(|_| "print(i)".to_string()));
+    huge.push("print(i * i)".to_string());
+    for src in [fib_program(), everything, main_with(&huge)] {
+        let text = asm(&src);
+        assert_lacks(&text, "_skip");
+        assert_lacks(&text, "b.vc");
+        assert_lacks(&text, "cbz");
+    }
+}
+
+/// A `cbnz` exactly 1,048,572 bytes ahead stays a `cbnz`.
+#[test]
+fn forward_cbnz_at_the_largest_distance_stays_short() {
+    let text = emit_ok(&forward_branch_module(262_141), FILE);
+    assert_contains(&text, "cbnz x8, Lmain_bb262142");
+    assert_lacks(&text, "_skip");
+    let distance = distance_in_bytes(&text, "cbnz x8, Lmain_bb262142", "Lmain_bb262142");
+    assert_eq!(distance, MAX_FORWARD);
+}
+
+/// A `cbnz` one instruction beyond +1,048,572 bytes becomes `cbz` over a `b`.
+#[test]
+fn forward_cbnz_one_instruction_further_is_relaxed() {
+    let text = emit_ok(&forward_branch_module(262_142), FILE);
+    assert_run(
+        &text,
+        &[
+            "ldr x8, [sp, #0]",
+            "cbz x8, Lmain_skip0",
+            "b Lmain_bb262143",
+            "Lmain_skip0:",
+            "b Lmain_bb1",
+        ],
+    );
+}
+
+/// A relaxed `cbnz` leaves no `cbnz` to the far block.
+#[test]
+fn relaxed_cbnz_is_gone() {
+    let text = emit_ok(&forward_branch_module(262_142), FILE);
+    assert_lacks(&text, "cbnz");
+}
+
+/// A `cbnz` exactly 1,048,576 bytes back stays a `cbnz`.
+#[test]
+fn backward_cbnz_at_the_largest_distance_stays_short() {
+    let text = emit_ok(&backward_branch_module(262_140), FILE);
+    assert_contains(&text, "cbnz x8, Lmain_bb1");
+    assert_lacks(&text, "_skip");
+    let distance = distance_in_bytes(&text, "cbnz x8, Lmain_bb1", "Lmain_bb1");
+    assert_eq!(distance, MAX_BACKWARD);
+}
+
+/// A `cbnz` one instruction beyond -1,048,576 bytes becomes `cbz` over a `b`.
+#[test]
+fn backward_cbnz_one_instruction_further_is_relaxed() {
+    let text = emit_ok(&backward_branch_module(262_141), FILE);
+    assert_run(
+        &text,
+        &[
+            "ldr x8, [sp, #0]",
+            "cbz x8, Lmain_skip0",
+            "b Lmain_bb1",
+            "Lmain_skip0:",
+            "b Lmain_bb262144",
+        ],
+    );
+}
+
+/// An overflow check exactly 1,048,572 bytes from its panic path stays a plain `b.vs`.
+#[test]
+fn overflow_check_at_the_largest_distance_stays_short() {
+    let text = emit_ok(&add_then_fillers(262_138), FILE);
+    assert_contains(&text, "b.vs Lmain_panic0");
+    assert_lacks(&text, "_skip");
+    let distance = distance_in_bytes(&text, "b.vs Lmain_panic0", "Lmain_panic0");
+    assert_eq!(distance, MAX_FORWARD);
+}
+
+/// An overflow check one instruction beyond +1,048,572 bytes becomes `b.vc` over a `b`, then stores.
+#[test]
+fn overflow_check_one_instruction_further_is_relaxed() {
+    let text = emit_ok(&add_then_fillers(262_139), FILE);
+    assert_run(
+        &text,
+        &[
+            "adds x8, x8, x9",
+            "b.vc Lmain_skip1",
+            "b Lmain_panic0",
+            "Lmain_skip1:",
+            "str x8, [sp, #16]",
+        ],
+    );
+}
+
+/// A far multiplication check inverts `b.ne` to `b.eq`.
+#[test]
+fn far_mul_check_is_inverted_to_eq() {
+    let insts = vec![constant(0, 3), constant(1, 4), binary(2, BinOp::Mul, 0, 1)];
+    let text = emit_ok(&far_panic_module(insts), FILE);
+    assert_run(
+        &text,
+        &[
+            "cmp x8, x9, asr #63",
+            "b.eq Lmain_skip1",
+            "b Lmain_panic0",
+            "Lmain_skip1:",
+        ],
+    );
+}
+
+/// A far negation check inverts `b.vs` to `b.vc`.
+#[test]
+fn far_neg_check_is_inverted_to_vc() {
+    let neg = Inst::Neg {
+        dst: Temp(1),
+        src: Temp(0),
+        loc: Loc { line: 3, col: 5 },
+    };
+    let text = emit_ok(&far_panic_module(vec![constant(0, 5), neg]), FILE);
+    assert_run(
+        &text,
+        &[
+            "negs x8, x8",
+            "b.vc Lmain_skip1",
+            "b Lmain_panic0",
+            "Lmain_skip1:",
+            "str x8, [sp, #8]",
+        ],
+    );
+}
+
+/// A far division-by-zero check inverts `b.eq` to `b.ne`; the next `ok` branch stays short.
+#[test]
+fn far_div_zero_check_is_inverted_to_ne() {
+    let insts = vec![constant(0, 7), constant(1, 2), binary(2, BinOp::Div, 0, 1)];
+    let text = emit_ok(&far_panic_module(insts), FILE);
+    assert_run(
+        &text,
+        &[
+            "cmp x8, #0",
+            "b.ne Lmain_skip3",
+            "b Lmain_panic0",
+            "Lmain_skip3:",
+            "ldr x8, [sp, #8]",
+            "cmn x8, #1",
+            "b.ne Lmain_ok1",
+        ],
+    );
+}
+
+/// A far `MIN / -1` check inverts `b.eq` to `b.ne`; skip labels follow instruction order.
+#[test]
+fn far_div_min_check_is_inverted_to_ne() {
+    let insts = vec![constant(0, 7), constant(1, 2), binary(2, BinOp::Div, 0, 1)];
+    let text = emit_ok(&far_panic_module(insts), FILE);
+    assert_run(
+        &text,
+        &[
+            "cmp x8, x9",
+            "b.ne Lmain_skip4",
+            "b Lmain_panic2",
+            "Lmain_skip4:",
+            "Lmain_ok1:",
+        ],
+    );
+}
+
+/// Relaxation keeps the `ok` label and the panic labels where isel put them.
+#[test]
+fn relaxation_keeps_isel_labels() {
+    let insts = vec![constant(0, 7), constant(1, 2), binary(2, BinOp::Div, 0, 1)];
+    let text = emit_ok(&far_panic_module(insts), FILE);
+    for label in ["Lmain_panic0:", "Lmain_ok1:", "Lmain_panic2:"] {
+        assert_eq!(count_lines(&text, label), 1, "{label}");
+    }
 }

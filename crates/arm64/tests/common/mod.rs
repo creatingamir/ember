@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use ir::{BinOp, Block, BlockId, Function, Inst, Loc, Temp, Terminator};
 use source::SourceFile;
 
 /// The file name every test program is compiled under; it shows up in panic messages.
@@ -134,12 +135,21 @@ fn clang(dir: &Path, args: &[&str], asm: &str) {
 
 /// Compiles, assembles, links and runs a program; returns its stdout, stderr and exit code.
 pub fn run(src: &str) -> (String, String, i32) {
-    let asm = asm(src);
-    let dir = TempDir::new();
-    fs::write(dir.path().join("prog.s"), &asm).unwrap();
+    run_asm(&asm(src))
+}
 
-    clang(dir.path(), &["-c", "prog.s", "-o", "prog.o"], &asm);
-    clang(dir.path(), &["prog.o", "-o", "prog"], &asm);
+/// Emits assembly for an IR module under the default file name, then assembles, links and runs it.
+pub fn run_module(module: &ir::Module) -> (String, String, i32) {
+    run_asm(&emit_ok(module, FILE))
+}
+
+/// Assembles, links and runs assembly text; returns the program's stdout, stderr and exit code.
+fn run_asm(asm: &str) -> (String, String, i32) {
+    let dir = TempDir::new();
+    fs::write(dir.path().join("prog.s"), asm).unwrap();
+
+    clang(dir.path(), &["-c", "prog.s", "-o", "prog.o"], asm);
+    clang(dir.path(), &["prog.o", "-o", "prog"], asm);
 
     let output = Command::new(dir.path().join("prog")).output().unwrap();
     // A process killed by a signal has no exit code; -1 makes the comparison fail loudly.
@@ -149,4 +159,60 @@ pub fn run(src: &str) -> (String, String, i32) {
         String::from_utf8(output.stderr).unwrap(),
         code,
     )
+}
+
+/// A block with the given id, instructions and terminator.
+pub fn block_of(id: u32, insts: Vec<Inst>, term: Terminator) -> Block {
+    Block {
+        id: BlockId(id),
+        insts,
+        term,
+    }
+}
+
+/// A module with one function `main` (no slots, no parameters) made of the given blocks.
+pub fn main_module(blocks: Vec<Block>) -> ir::Module {
+    ir::Module {
+        functions: vec![Function {
+            name: "main".to_string(),
+            params: vec![],
+            returns_value: false,
+            slots: vec![],
+            blocks,
+        }],
+    }
+}
+
+/// `count` blocks that end in `Unreachable` (one `brk` each), numbered from `first_id`.
+pub fn unreachable_blocks(first_id: u32, count: u32) -> Vec<Block> {
+    (first_id..first_id + count)
+        .map(|id| block_of(id, vec![], Terminator::Unreachable))
+        .collect()
+}
+
+/// A temp holding a constant, as an instruction.
+pub fn constant(temp: u32, value: i64) -> Inst {
+    Inst::Const {
+        dst: Temp(temp),
+        value,
+    }
+}
+
+/// A binary instruction on temps with the source location 3:5.
+pub fn binary(dst: u32, op: BinOp, lhs: u32, rhs: u32) -> Inst {
+    Inst::Binary {
+        dst: Temp(dst),
+        op,
+        lhs: Temp(lhs),
+        rhs: Temp(rhs),
+        loc: Loc { line: 3, col: 5 },
+    }
+}
+
+/// A `main` that sets `x` with `first_line`, adds 1 to it `count` times and prints it; line 2 is `first_line`, line 3 the first `x += 1`.
+pub fn counter_program(first_line: &str, count: usize) -> String {
+    let mut body = vec![format!("    {first_line}")];
+    body.extend((0..count).map(|_| "    x += 1".to_string()));
+    body.push("    print(x)".to_string());
+    main_with(&body)
 }

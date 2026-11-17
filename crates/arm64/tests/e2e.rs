@@ -5,7 +5,11 @@
 
 mod common;
 
-use common::{MAX, MIN, loc, main_with, panic_stderr, program, run};
+use common::{
+    MAX, MIN, binary, block_of, constant, counter_program, loc, main_module, main_with,
+    panic_stderr, program, run, run_module, unreachable_blocks,
+};
+use ir::{BinOp, Inst, Loc, Temp, Terminator};
 
 /// Asserts that the program runs cleanly: exit code 0, nothing on stderr, exactly this stdout.
 fn assert_output(src: &str, expected_stdout: &str) {
@@ -1722,4 +1726,148 @@ fn far_frame_min_divided_by_minus_one_panics() {
 fn far_frame_remainder_by_zero_panics() {
     let src = huge_main_with(&["z := 0", "print(i % z)"]);
     assert_panics(&src, "division by zero", "i % z", 0, &sevens());
+}
+
+/// The largest value `x` can start with so that 20,000 increments end at `i64::MAX + 1`: the last one panics.
+const LAST_INCREMENT_PANICS: &str = "9223372036854755808";
+
+/// 20,000 increments in one function (the first panic path is over 1 MiB away) build and count to 20000.
+#[test]
+fn twenty_thousand_increments_count_to_20000() {
+    assert_output(&counter_program("x := 0", 20_000), "20000\n");
+}
+
+/// The first increment overflows through a relaxed branch.
+#[test]
+fn first_of_twenty_thousand_increments_panics_through_a_relaxed_branch() {
+    let src = counter_program(&format!("x := {MAX}"), 20_000);
+    let (stdout, stderr, code) = run(&src);
+    assert_eq!(stdout, "");
+    assert_eq!(stderr, "panic: integer overflow at t.em:3:5\n");
+    assert_eq!(code, 101);
+}
+
+/// The last increment overflows through a branch that stays short.
+#[test]
+fn last_of_twenty_thousand_increments_panics_through_a_short_branch() {
+    let src = counter_program(&format!("x := {LAST_INCREMENT_PANICS}"), 20_000);
+    let (stdout, stderr, code) = run(&src);
+    assert_eq!(stdout, "");
+    assert_eq!(stderr, "panic: integer overflow at t.em:20002:5\n");
+    assert_eq!(code, 101);
+}
+
+/// A `main` that branches on a true `t0` past block 1 (140,000 constants, over 1 MiB) to block 2, which runs `target_insts`.
+fn far_cbnz_module(target_insts: Vec<Inst>) -> ir::Module {
+    let branch = Terminator::Branch {
+        cond: Temp(0),
+        then_to: ir::BlockId(2),
+        else_to: ir::BlockId(1),
+    };
+    let skipped: Vec<Inst> = (1..=140_000).map(|temp| constant(temp, 0)).collect();
+    main_module(vec![
+        block_of(0, vec![constant(0, 1)], branch),
+        block_of(1, skipped, Terminator::Return(None)),
+        block_of(2, target_insts, Terminator::Return(None)),
+    ])
+}
+
+/// A relaxed `cbnz` (a `cbz` over a `b`) still takes the branch: the print block is 140,000 constants away.
+#[test]
+fn far_cbnz_takes_the_branch_to_the_print() {
+    let print = Inst::Print {
+        src: Temp(0),
+        kind: ir::PrintKind::I64,
+    };
+    let module = far_cbnz_module(vec![print]);
+    assert_eq!(run_module(&module), ("1\n".to_string(), String::new(), 0));
+}
+
+/// The text of that far `cbnz` is a `cbz` over a `b` to the print block.
+#[test]
+fn far_cbnz_is_assembled_as_cbz_over_a_jump() {
+    let text = common::emit_ok(&far_cbnz_module(vec![]), common::FILE);
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let cbz = lines
+        .iter()
+        .position(|line| line.starts_with("cbz x8, Lmain_skip"));
+    assert!(cbz.is_some(), "no `cbz x8, Lmain_skip…` found");
+    assert_eq!(lines[cbz.unwrap() + 1], "b Lmain_bb2");
+}
+
+/// A `main` that runs `insts` and prints `t2`, then returns; unreachable blocks (more than 1 MiB of code) sit before the panic paths.
+fn far_op_module(insts: Vec<Inst>) -> ir::Module {
+    let print = Inst::Print {
+        src: Temp(2),
+        kind: ir::PrintKind::I64,
+    };
+    let mut body = insts;
+    body.push(print);
+    let mut blocks = vec![block_of(0, body, Terminator::Return(None))];
+    blocks.extend(unreachable_blocks(1, 262_200));
+    main_module(blocks)
+}
+
+/// A binary instruction on `t0` and `t1` into `t2` at source location 3:5.
+fn op_on_constants(a: i64, op: BinOp, b: i64) -> Vec<Inst> {
+    vec![constant(0, a), constant(1, b), binary(2, op, 0, 1)]
+}
+
+/// A far multiplication that fits runs through the relaxed check and prints the product.
+#[test]
+fn far_mul_without_overflow_prints_the_product() {
+    let module = far_op_module(op_on_constants(6, BinOp::Mul, 7));
+    assert_eq!(run_module(&module), ("42\n".to_string(), String::new(), 0));
+}
+
+/// A far multiplication that overflows panics through the relaxed check.
+#[test]
+fn far_mul_overflow_panics() {
+    let module = far_op_module(op_on_constants(i64::MAX, BinOp::Mul, 2));
+    let (stdout, stderr, code) = run_module(&module);
+    assert_eq!(stdout, "");
+    assert_eq!(stderr, "panic: integer overflow at t.em:3:5\n");
+    assert_eq!(code, 101);
+}
+
+/// A far division that is fine prints the quotient.
+#[test]
+fn far_div_without_panic_prints_the_quotient() {
+    let module = far_op_module(op_on_constants(7, BinOp::Div, 2));
+    assert_eq!(run_module(&module), ("3\n".to_string(), String::new(), 0));
+}
+
+/// A far division by zero panics through the relaxed zero check.
+#[test]
+fn far_div_by_zero_panics() {
+    let module = far_op_module(op_on_constants(7, BinOp::Div, 0));
+    let (stdout, stderr, code) = run_module(&module);
+    assert_eq!(stdout, "");
+    assert_eq!(stderr, "panic: division by zero at t.em:3:5\n");
+    assert_eq!(code, 101);
+}
+
+/// A far `MIN / -1` panics through the relaxed overflow check.
+#[test]
+fn far_min_divided_by_minus_one_panics() {
+    let module = far_op_module(op_on_constants(i64::MIN, BinOp::Div, -1));
+    let (stdout, stderr, code) = run_module(&module);
+    assert_eq!(stdout, "");
+    assert_eq!(stderr, "panic: integer overflow at t.em:3:5\n");
+    assert_eq!(code, 101);
+}
+
+/// A far negation of `i64::MIN` panics through the relaxed check.
+#[test]
+fn far_negation_of_min_panics() {
+    let neg = Inst::Neg {
+        dst: Temp(2),
+        src: Temp(0),
+        loc: Loc { line: 3, col: 5 },
+    };
+    let module = far_op_module(vec![constant(0, i64::MIN), neg]);
+    let (stdout, stderr, code) = run_module(&module);
+    assert_eq!(stdout, "");
+    assert_eq!(stderr, "panic: integer overflow at t.em:3:5\n");
+    assert_eq!(code, 101);
 }

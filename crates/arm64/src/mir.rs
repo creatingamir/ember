@@ -58,6 +58,24 @@ pub enum Cond {
     Ge,
     /// Signed overflow.
     Vs,
+    /// No signed overflow; only branch relaxation creates it.
+    Vc,
+}
+
+impl Cond {
+    /// The condition that holds exactly when this one does not.
+    pub fn inverse(self) -> Cond {
+        match self {
+            Cond::Eq => Cond::Ne,
+            Cond::Ne => Cond::Eq,
+            Cond::Lt => Cond::Ge,
+            Cond::Ge => Cond::Lt,
+            Cond::Le => Cond::Gt,
+            Cond::Gt => Cond::Le,
+            Cond::Vs => Cond::Vc,
+            Cond::Vc => Cond::Vs,
+        }
+    }
 }
 
 /// How an instruction uses one of its registers.
@@ -233,6 +251,13 @@ pub enum MInst {
         /// The label jumped to when the register is not zero.
         target: String,
     },
+    /// `cbz reg, target`; only branch relaxation creates it.
+    Cbz {
+        /// The register tested.
+        reg: Reg,
+        /// The label jumped to when the register is zero.
+        target: String,
+    },
     /// `b.<cond> target` to a panic path. The panic path never reads a value, so the allocator may
     /// store a result after this branch.
     PanicIf {
@@ -301,7 +326,7 @@ impl MInst {
                 visit(rhs, Use);
             }
             MInst::CmpImm { lhs, .. } | MInst::CmnImm { lhs, .. } => visit(lhs, Use),
-            MInst::Cbnz { reg, .. } => visit(reg, Use),
+            MInst::Cbnz { reg, .. } | MInst::Cbz { reg, .. } => visit(reg, Use),
             MInst::Bl { args, .. } => {
                 for number in 0..*args {
                     visit(&mut Reg::phys(number), Use);
@@ -335,6 +360,8 @@ pub struct MFunction {
     pub slot_count: u32,
     /// The number of virtual registers (IR temps plus the ones isel makes); set by isel.
     pub vreg_count: u32,
+    /// The number the next local label gets; isel stops at the first unused one and relaxation continues.
+    pub next_label: u32,
     /// The instructions in order: `Prologue`, parameter stores, blocks, panic paths.
     pub insts: Vec<MInst>,
     /// The frame size in bytes reserved below `x29`; set by frame layout, 0 before.

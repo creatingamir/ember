@@ -192,6 +192,7 @@ mod tests {
             name: "f".to_string(),
             slot_count: 0,
             vreg_count: 4,
+            next_label: 0,
             insts,
             frame_size: 0,
         }
