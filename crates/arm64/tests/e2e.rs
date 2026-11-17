@@ -1661,3 +1661,65 @@ fn callee_with_a_frame_above_32760_bytes_restores_the_caller() {
     );
     assert_output(&program(&lines), "11\n1500\n1511\n11\n");
 }
+
+/// `i := 7`, 4,200 prints of `i` (more than 4,096 cells), then the given statements.
+fn huge_main_with(tail: &[&str]) -> String {
+    let mut body = vec!["i := 7".to_string()];
+    body.extend((0..4200).map(|_| "print(i)".to_string()));
+    body.extend(tail.iter().map(|line| line.to_string()));
+    main_with(&body)
+}
+
+/// The output of 4,200 prints of 7.
+fn sevens() -> String {
+    "7\n".repeat(4200)
+}
+
+/// A product in a function with far cells prints correctly (the high half lives in a far cell).
+#[test]
+fn far_frame_multiplication_prints_the_product() {
+    let src = huge_main_with(&["print(i * i)"]);
+    assert_output(&src, &format!("{}49\n", sevens()));
+}
+
+/// A quotient in a function with far cells prints correctly.
+#[test]
+fn far_frame_division_prints_the_quotient() {
+    let src = huge_main_with(&["print(i / 2)"]);
+    assert_output(&src, &format!("{}3\n", sevens()));
+}
+
+/// A remainder in a function with far cells prints correctly.
+#[test]
+fn far_frame_remainder_prints_the_remainder() {
+    let src = huge_main_with(&["print(i % 4)"]);
+    assert_output(&src, &format!("{}3\n", sevens()));
+}
+
+/// A multiplication overflow in a function with far cells panics with the exact message.
+#[test]
+fn far_frame_multiplication_overflow_panics() {
+    let src = huge_main_with(&[&format!("j := {MAX}"), "print(i * j)"]);
+    assert_panics(&src, "integer overflow", "i * j", 0, &sevens());
+}
+
+/// A division by zero in a function with far cells panics with the exact message.
+#[test]
+fn far_frame_division_by_zero_panics() {
+    let src = huge_main_with(&["z := 0", "print(i / z)"]);
+    assert_panics(&src, "division by zero", "i / z", 0, &sevens());
+}
+
+/// `MIN / -1` in a function with far cells panics with an overflow.
+#[test]
+fn far_frame_min_divided_by_minus_one_panics() {
+    let src = huge_main_with(&[&format!("m := {MIN}"), "d := -1", "print(m / d)"]);
+    assert_panics(&src, "integer overflow", "m / d", 0, &sevens());
+}
+
+/// A remainder by zero in a function with far cells panics with the exact message.
+#[test]
+fn far_frame_remainder_by_zero_panics() {
+    let src = huge_main_with(&["z := 0", "print(i % z)"]);
+    assert_panics(&src, "division by zero", "i % z", 0, &sevens());
+}

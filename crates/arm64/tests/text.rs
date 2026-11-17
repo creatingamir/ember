@@ -6,7 +6,7 @@
 mod common;
 
 use common::{FILE, asm, asm_named, emit_ok, main_with, program};
-use ir::{Block, BlockId, Function, Inst, Module, SlotId, Temp, Terminator};
+use ir::{BinOp, Block, BlockId, Function, Inst, Loc, Module, PrintKind, SlotId, Temp, Terminator};
 use source::Span;
 
 /// A recursive `fib` and a `main` that prints `fib(10)`.
@@ -307,25 +307,22 @@ fn sub_uses_subs() {
 #[test]
 fn mul_uses_smulh() {
     let text = asm_of_main(&["a := 1", "print(a * a)"]);
-    assert_contains(&text, "mul x10, x8, x9");
-    assert_contains(&text, "smulh x11, x8, x9");
+    assert_contains(&text, "mul x8, x8, x9");
+    assert_contains(&text, "smulh x8, x8, x9");
 }
 
 /// Division uses `sdiv`.
 #[test]
 fn div_uses_sdiv() {
-    assert_contains(
-        &asm_of_main(&["a := 1", "print(a / a)"]),
-        "sdiv x10, x8, x9",
-    );
+    assert_contains(&asm_of_main(&["a := 1", "print(a / a)"]), "sdiv x8, x8, x9");
 }
 
 /// Remainder uses `msub` after `sdiv`.
 #[test]
 fn rem_uses_msub() {
     let text = asm_of_main(&["a := 1", "print(a % a)"]);
-    assert_contains(&text, "sdiv x10, x8, x9");
-    assert_contains(&text, "msub x10, x10, x9, x8");
+    assert_contains(&text, "sdiv x8, x8, x9");
+    assert_contains(&text, "msub x8, x8, x9, x10");
 }
 
 /// Negation is checked with `negs`.
@@ -501,4 +498,774 @@ fn file_name_escapes_delete() {
 #[test]
 fn file_name_keeps_printable_ascii() {
     assert_file_name_escaped("my file-1_x.em", "my file-1_x.em");
+}
+
+// ---------------------------------------------------------------------------------------------
+// M2.1a: the machine IR and the naive allocator. The MIR modules are private to the crate, so
+// these tests go through `arm64::emit` and check the exact text the naive allocator produces.
+// ---------------------------------------------------------------------------------------------
+
+/// The trimmed lines of `text`.
+fn trimmed_lines(text: &str) -> Vec<&str> {
+    text.lines().map(str::trim).collect()
+}
+
+/// Asserts that `run` appears in `text` as consecutive lines (ignoring indentation).
+fn assert_run(text: &str, run: &[&str]) {
+    let lines = trimmed_lines(text);
+    let found = lines.windows(run.len()).any(|window| window == run);
+    assert!(found, "lines {run:#?} not found consecutively in:\n{text}");
+}
+
+/// The lines of one function's body: everything after `symbol:` up to the next directive or symbol.
+fn function_text(text: &str, symbol: &str) -> String {
+    let header = format!("{symbol}:");
+    let body: Vec<&str> = text
+        .lines()
+        .skip_while(|line| *line != header)
+        .skip(1)
+        .take_while(|line| !line.starts_with('.') && !line.starts_with('_'))
+        .collect();
+    assert!(!body.is_empty(), "`{symbol}` not found in:\n{text}");
+    body.join("\n")
+}
+
+/// A program with `fn f(a: i64, b: i64) -> i64 { return a OP b }` and a `main` that calls it.
+fn binary_program(op: &str) -> String {
+    program(&[
+        "fn f(a: i64, b: i64) -> i64 {".to_string(),
+        format!("    return a {op} b"),
+        "}".to_string(),
+        "fn main() {".to_string(),
+        "    print(f(7, 2))".to_string(),
+        "}".to_string(),
+    ])
+}
+
+/// Assembly for `i := 7`, 4,200 prints of `i`, then the given extra statements, all in `main`.
+fn asm_of_huge_main(tail: &[&str]) -> String {
+    let mut body = vec!["i := 7".to_string()];
+    body.extend((0..4200).map(|_| "print(i)".to_string()));
+    body.extend(tail.iter().map(|line| line.to_string()));
+    asm(&main_with(&body))
+}
+
+/// A block with the given id, instructions and terminator.
+fn block_of(id: u32, insts: Vec<Inst>, term: Terminator) -> Block {
+    Block {
+        id: BlockId(id),
+        insts,
+        term,
+    }
+}
+
+/// A module with one function `main` that has no slots and the given blocks.
+fn module_of_blocks(returns_value: bool, blocks: Vec<Block>) -> Module {
+    let mut module = module_of(vec![], Terminator::Return(None));
+    module.functions[0].returns_value = returns_value;
+    module.functions[0].blocks = blocks;
+    module
+}
+
+/// Assembly for the module with one `main` block made of `insts` and `term`.
+fn asm_of_insts(insts: Vec<Inst>, term: Terminator) -> String {
+    emit_ok(&module_of(insts, term), FILE)
+}
+
+/// A temp holding a constant, as an instruction.
+fn constant(temp: u32, value: i64) -> Inst {
+    Inst::Const {
+        dst: Temp(temp),
+        value,
+    }
+}
+
+/// A binary instruction on temps with a fixed source location.
+fn binary(dst: u32, op: BinOp, lhs: u32, rhs: u32) -> Inst {
+    Inst::Binary {
+        dst: Temp(dst),
+        op,
+        lhs: Temp(lhs),
+        rhs: Temp(rhs),
+        loc: Loc { line: 3, col: 5 },
+    }
+}
+
+/// The frame of `f(a, b)` with `*` has 6 cells: two slots, `t0`..`t2` and isel's `h`.
+#[test]
+fn mul_frame_counts_the_high_half_register() {
+    let text = asm(&binary_program("*"));
+    assert_run(&function_text(&text, "_em_f"), &["sub sp, sp, #48"]);
+}
+
+/// The product is computed from the loaded operands and stored to its own cell before the high half.
+#[test]
+fn mul_stores_the_product_in_its_cell() {
+    let text = function_text(&asm(&binary_program("*")), "_em_f");
+    assert_run(
+        &text,
+        &[
+            "ldr x8, [sp, #16]",
+            "ldr x9, [sp, #24]",
+            "mul x8, x8, x9",
+            "str x8, [sp, #32]",
+        ],
+    );
+}
+
+/// The high half is computed from freshly loaded operands and stored in isel's register (cell 5).
+#[test]
+fn mul_stores_the_high_half_in_the_isel_register_cell() {
+    let text = function_text(&asm(&binary_program("*")), "_em_f");
+    assert_run(
+        &text,
+        &[
+            "ldr x8, [sp, #16]",
+            "ldr x9, [sp, #24]",
+            "smulh x8, x8, x9",
+            "str x8, [sp, #40]",
+        ],
+    );
+}
+
+/// The overflow check compares the high half with the sign of the product, then branches.
+#[test]
+fn mul_overflow_check_loads_both_cells() {
+    let text = function_text(&asm(&binary_program("*")), "_em_f");
+    assert_run(
+        &text,
+        &[
+            "ldr x8, [sp, #40]",
+            "ldr x9, [sp, #32]",
+            "cmp x8, x9, asr #63",
+            "b.ne Lf_panic0",
+        ],
+    );
+}
+
+/// The product is stored before the high half is computed.
+#[test]
+fn mul_computes_the_product_before_the_high_half() {
+    let text = function_text(&asm(&binary_program("*")), "_em_f");
+    assert_run(
+        &text,
+        &[
+            "str x8, [sp, #32]",
+            "ldr x8, [sp, #16]",
+            "ldr x9, [sp, #24]",
+            "smulh x8, x8, x9",
+        ],
+    );
+}
+
+/// The frame of `f(a, b)` with `/` has 6 cells: two slots, `t0`..`t2` and isel's `m`.
+#[test]
+fn div_frame_counts_the_minimum_register() {
+    let text = asm(&binary_program("/"));
+    assert_run(&function_text(&text, "_em_f"), &["sub sp, sp, #48"]);
+}
+
+/// The zero check reloads the divisor into `x8` and branches to the first panic label.
+#[test]
+fn div_zero_check_loads_the_divisor() {
+    let text = function_text(&asm(&binary_program("/")), "_em_f");
+    assert_run(
+        &text,
+        &["ldr x8, [sp, #24]", "cmp x8, #0", "b.eq Lf_panic0"],
+    );
+}
+
+/// The `-1` check reloads the divisor and skips the `MIN` check through the `ok` label.
+#[test]
+fn div_minus_one_check_loads_the_divisor() {
+    let text = function_text(&asm(&binary_program("/")), "_em_f");
+    assert_run(&text, &["ldr x8, [sp, #24]", "cmn x8, #1", "b.ne Lf_ok1"]);
+}
+
+/// `i64::MIN` is built in `x8` and stored in isel's register (cell 5), then compared with the dividend.
+#[test]
+fn div_min_check_goes_through_the_isel_register() {
+    let text = function_text(&asm(&binary_program("/")), "_em_f");
+    assert_run(
+        &text,
+        &[
+            "movz x8, #0",
+            "movk x8, #32768, lsl #48",
+            "str x8, [sp, #40]",
+            "ldr x8, [sp, #16]",
+            "ldr x9, [sp, #40]",
+            "cmp x8, x9",
+            "b.eq Lf_panic2",
+            "Lf_ok1:",
+        ],
+    );
+}
+
+/// After the `ok` label the quotient is computed from the reloaded operands and stored.
+#[test]
+fn div_quotient_is_loaded_computed_and_stored() {
+    let text = function_text(&asm(&binary_program("/")), "_em_f");
+    assert_run(
+        &text,
+        &[
+            "Lf_ok1:",
+            "ldr x8, [sp, #16]",
+            "ldr x9, [sp, #24]",
+            "sdiv x8, x8, x9",
+            "str x8, [sp, #32]",
+        ],
+    );
+}
+
+/// The zero-division panic label is numbered before the `ok` label, which is numbered before the overflow label.
+#[test]
+fn div_labels_are_numbered_in_creation_order() {
+    let text = function_text(&asm(&binary_program("/")), "_em_f");
+    let lines = trimmed_lines(&text);
+    let position = |label: &str| lines.iter().position(|line| *line == label).unwrap();
+    assert!(position("Lf_ok1:") < position("Lf_panic0:"));
+    assert!(position("Lf_panic0:") < position("Lf_panic2:"));
+}
+
+/// The frame of `f(a, b)` with `%` has 7 cells: two slots, `t0`..`t2`, `m` and `q` (56 bytes, rounded to 64).
+#[test]
+fn rem_frame_counts_both_isel_registers() {
+    let text = asm(&binary_program("%"));
+    assert_run(&function_text(&text, "_em_f"), &["sub sp, sp, #64"]);
+}
+
+/// The quotient of a remainder is stored in isel's register `q` (cell 6).
+#[test]
+fn rem_stores_the_quotient_in_the_isel_register_cell() {
+    let text = function_text(&asm(&binary_program("%")), "_em_f");
+    assert_run(
+        &text,
+        &[
+            "ldr x8, [sp, #16]",
+            "ldr x9, [sp, #24]",
+            "sdiv x8, x8, x9",
+            "str x8, [sp, #48]",
+        ],
+    );
+}
+
+/// `msub` reads the quotient, the divisor and the dividend into `x8`, `x9` and `x10`.
+#[test]
+fn rem_msub_reads_quotient_divisor_dividend() {
+    let text = function_text(&asm(&binary_program("%")), "_em_f");
+    assert_run(
+        &text,
+        &[
+            "ldr x8, [sp, #48]",
+            "ldr x9, [sp, #24]",
+            "ldr x10, [sp, #16]",
+            "msub x8, x8, x9, x10",
+            "str x8, [sp, #32]",
+        ],
+    );
+}
+
+/// `rem` keeps the zero check and the `MIN / -1` check of `div`.
+#[test]
+fn rem_keeps_the_division_checks() {
+    let text = function_text(&asm(&binary_program("%")), "_em_f");
+    assert_run(
+        &text,
+        &["ldr x8, [sp, #24]", "cmp x8, #0", "b.eq Lf_panic0"],
+    );
+    assert_run(&text, &["ldr x8, [sp, #24]", "cmn x8, #1", "b.ne Lf_ok1"]);
+}
+
+/// `*` uses only `x8` and `x9`; `x10` and `x11` are not touched.
+#[test]
+fn mul_uses_no_scratch_beyond_x9() {
+    let text = function_text(&asm(&binary_program("*")), "_em_f");
+    assert_lacks(&text, "x10");
+    assert_lacks(&text, "x11");
+}
+
+/// `/` uses only `x8` and `x9`; `x10` and `x11` are not touched.
+#[test]
+fn div_uses_no_scratch_beyond_x9() {
+    let text = function_text(&asm(&binary_program("/")), "_em_f");
+    assert_lacks(&text, "x10");
+    assert_lacks(&text, "x11");
+}
+
+/// Only `%` reads three registers, so only `%` uses `x10`, and nothing uses `x11`.
+#[test]
+fn rem_uses_x10_but_not_x11() {
+    let text = function_text(&asm(&binary_program("%")), "_em_f");
+    assert_contains(&text, "x10");
+    assert_lacks(&text, "x11");
+}
+
+/// `main` with a plain `print(1)` uses neither `x10` nor `x11` (the runtime helpers do, so only `main` is checked).
+#[test]
+fn print_main_uses_no_x10_or_x11() {
+    let text = function_text(&asm_of_main(&["print(1)"]), "_em_main");
+    assert_lacks(&text, "x10");
+    assert_lacks(&text, "x11");
+}
+
+/// `fib` copies its parameter into its slot (cell 0) from `x0`.
+#[test]
+fn fib_parameter_is_stored_in_cell_zero() {
+    let text = function_text(&asm(&fib_program()), "_em_fib");
+    assert_run(&text, &["str x0, [sp, #0]", "Lfib_bb0:"]);
+}
+
+/// The first block of `fib` loads the slot and stores the temp in the next cell.
+#[test]
+fn fib_first_block_loads_the_slot_into_its_temp_cell() {
+    let text = function_text(&asm(&fib_program()), "_em_fib");
+    assert_run(
+        &text,
+        &["Lfib_bb0:", "ldr x8, [sp, #0]", "str x8, [sp, #8]"],
+    );
+}
+
+/// In `fib` the first `subs` is followed by its overflow branch, then by the store of its result.
+#[test]
+fn fib_branches_on_the_difference_before_storing_it() {
+    let text = function_text(&asm(&fib_program()), "_em_fib");
+    let lines = trimmed_lines(&text);
+    let subs = lines.iter().position(|line| *line == "subs x8, x8, x9");
+    assert!(subs.is_some(), "no `subs x8, x8, x9` in:\n{text}");
+    let subs = subs.unwrap();
+    assert_eq!(lines[subs + 1], "b.vs Lfib_panic0");
+    assert!(
+        lines[subs + 2].starts_with("str x8, [sp, #"),
+        "line after the branch is `{}`",
+        lines[subs + 2]
+    );
+}
+
+/// In `fib` every `adds` and `subs` is followed by a `b.vs`, then by a store of `x8`.
+#[test]
+fn every_checked_add_and_sub_branches_before_storing() {
+    let text = function_text(&asm(&fib_program()), "_em_fib");
+    let lines = trimmed_lines(&text);
+    let checked = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with("adds ") || line.starts_with("subs "))
+        .map(|(index, _)| index)
+        .collect::<Vec<usize>>();
+    assert_eq!(
+        checked.len(),
+        3,
+        "expected two subs and one adds in:\n{text}"
+    );
+    for index in checked {
+        assert!(
+            lines[index + 1].starts_with("b.vs Lfib_panic"),
+            "after `{}`",
+            lines[index]
+        );
+        assert!(
+            lines[index + 2].starts_with("str x8, [sp, #"),
+            "after the branch of `{}`",
+            lines[index]
+        );
+    }
+}
+
+/// Phase 1's `_em_fib` body (from `feat/m1.6-driver`), with the unindented labels and indented instructions as printed.
+const PHASE1_FIB_BODY: &[&str] = &[
+    "    stp x29, x30, [sp, #-16]!",
+    "    mov x29, sp",
+    "    sub sp, sp, #112",
+    "    str x0, [sp, #0]",
+    "Lfib_bb0:",
+    "    ldr x8, [sp, #0]",
+    "    str x8, [sp, #8]",
+    "    movz x8, #2",
+    "    str x8, [sp, #16]",
+    "    ldr x8, [sp, #8]",
+    "    ldr x9, [sp, #16]",
+    "    cmp x8, x9",
+    "    cset x8, lt",
+    "    str x8, [sp, #24]",
+    "    ldr x8, [sp, #24]",
+    "    cbnz x8, Lfib_bb1",
+    "    b Lfib_bb2",
+    "Lfib_bb1:",
+    "    ldr x8, [sp, #0]",
+    "    str x8, [sp, #32]",
+    "    ldr x0, [sp, #32]",
+    "    mov sp, x29",
+    "    ldp x29, x30, [sp], #16",
+    "    ret",
+    "Lfib_bb2:",
+    "    ldr x8, [sp, #0]",
+    "    str x8, [sp, #40]",
+    "    movz x8, #1",
+    "    str x8, [sp, #48]",
+    "    ldr x8, [sp, #40]",
+    "    ldr x9, [sp, #48]",
+    "    subs x8, x8, x9",
+    "    b.vs Lfib_panic0",
+    "    str x8, [sp, #56]",
+    "    ldr x0, [sp, #56]",
+    "    bl _em_fib",
+    "    str x0, [sp, #64]",
+    "    ldr x8, [sp, #0]",
+    "    str x8, [sp, #72]",
+    "    movz x8, #2",
+    "    str x8, [sp, #80]",
+    "    ldr x8, [sp, #72]",
+    "    ldr x9, [sp, #80]",
+    "    subs x8, x8, x9",
+    "    b.vs Lfib_panic1",
+    "    str x8, [sp, #88]",
+    "    ldr x0, [sp, #88]",
+    "    bl _em_fib",
+    "    str x0, [sp, #96]",
+    "    ldr x8, [sp, #64]",
+    "    ldr x9, [sp, #96]",
+    "    adds x8, x8, x9",
+    "    b.vs Lfib_panic2",
+    "    str x8, [sp, #104]",
+    "    ldr x0, [sp, #104]",
+    "    mov sp, x29",
+    "    ldp x29, x30, [sp], #16",
+    "    ret",
+    "Lfib_panic0:",
+    "    movz x0, #5",
+    "    movz x1, #16",
+    "    adrp x2, Lstr_overflow@PAGE",
+    "    add x2, x2, Lstr_overflow@PAGEOFF",
+    "    bl _ember_rt_panic",
+    "Lfib_panic1:",
+    "    movz x0, #5",
+    "    movz x1, #29",
+    "    adrp x2, Lstr_overflow@PAGE",
+    "    add x2, x2, Lstr_overflow@PAGEOFF",
+    "    bl _ember_rt_panic",
+    "Lfib_panic2:",
+    "    movz x0, #5",
+    "    movz x1, #12",
+    "    adrp x2, Lstr_overflow@PAGE",
+    "    add x2, x2, Lstr_overflow@PAGEOFF",
+    "    bl _ember_rt_panic",
+    "    .globl _em_main",
+    "    .p2align 2",
+];
+
+/// `fib` has no `mul`, `div` or `rem`, so its body is byte-identical to Phase 1's (comments and blank lines aside).
+#[test]
+fn fib_body_is_identical_to_phase_1() {
+    let text = function_text(&asm(&fib_program()), "_em_fib");
+    let actual: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter(|line| !line.trim_start().starts_with("//") && !line.trim_start().starts_with(';'))
+        .collect();
+    assert_eq!(actual, PHASE1_FIB_BODY);
+}
+
+/// A `Const` is built in `x8` and stored in its temp's cell.
+#[test]
+fn const_is_built_in_x8_and_stored() {
+    let text = asm_of_insts(vec![constant(0, 42)], Terminator::Return(None));
+    assert_run(&text, &["movz x8, #42", "str x8, [sp, #0]"]);
+}
+
+/// A slot store loads the temp into `x8` and stores it in the slot's cell.
+#[test]
+fn slot_store_loads_the_temp_then_stores() {
+    let mut module = module_of(
+        vec![
+            constant(0, 5),
+            Inst::Store {
+                slot: SlotId(0),
+                src: Temp(0),
+            },
+        ],
+        Terminator::Return(None),
+    );
+    module.functions[0].slots = vec![ir::Slot {
+        name: "x".to_string(),
+    }];
+    // One slot, so the temp's cell is cell 1.
+    assert_run(
+        &emit_ok(&module, FILE),
+        &["ldr x8, [sp, #8]", "str x8, [sp, #0]"],
+    );
+}
+
+/// A slot load loads the slot into `x8` and stores it in the temp's cell.
+#[test]
+fn slot_load_loads_the_slot_then_stores_the_temp() {
+    let mut module = module_of(
+        vec![Inst::Load {
+            dst: Temp(0),
+            slot: SlotId(0),
+        }],
+        Terminator::Return(None),
+    );
+    module.functions[0].slots = vec![ir::Slot {
+        name: "x".to_string(),
+    }];
+    assert_run(
+        &emit_ok(&module, FILE),
+        &["ldr x8, [sp, #0]", "str x8, [sp, #8]"],
+    );
+}
+
+/// An instruction that reads one register twice loads it once and uses the same scratch for both operands.
+#[test]
+fn a_register_read_twice_uses_one_scratch() {
+    let text = asm_of_insts(
+        vec![constant(0, 1), binary(1, BinOp::Add, 0, 0)],
+        Terminator::Return(None),
+    );
+    assert_run(
+        &text,
+        &[
+            "ldr x8, [sp, #0]",
+            "adds x8, x8, x8",
+            "b.vs Lmain_panic0",
+            "str x8, [sp, #8]",
+        ],
+    );
+}
+
+/// A comparison loads both operands, sets the result in `x8`, and stores it; `cmp` itself stores nothing.
+#[test]
+fn comparison_loads_compares_sets_and_stores() {
+    let text = asm_of_insts(
+        vec![constant(0, 1), constant(1, 2), binary(2, BinOp::Lt, 0, 1)],
+        Terminator::Return(None),
+    );
+    assert_run(
+        &text,
+        &[
+            "ldr x8, [sp, #0]",
+            "ldr x9, [sp, #8]",
+            "cmp x8, x9",
+            "cset x8, lt",
+            "str x8, [sp, #16]",
+        ],
+    );
+}
+
+/// Negation loads the operand, negates in `x8`, branches on overflow, then stores the result.
+#[test]
+fn neg_loads_negates_branches_then_stores() {
+    let neg = Inst::Neg {
+        dst: Temp(1),
+        src: Temp(0),
+        loc: Loc { line: 3, col: 5 },
+    };
+    let text = asm_of_insts(vec![constant(0, 1), neg], Terminator::Return(None));
+    assert_run(
+        &text,
+        &[
+            "ldr x8, [sp, #0]",
+            "negs x8, x8",
+            "b.vs Lmain_panic0",
+            "str x8, [sp, #8]",
+        ],
+    );
+}
+
+/// Logical not loads the operand, flips the low bit in `x8` and stores the result.
+#[test]
+fn not_loads_flips_and_stores() {
+    let not = Inst::Not {
+        dst: Temp(1),
+        src: Temp(0),
+    };
+    let text = asm_of_insts(vec![constant(0, 1), not], Terminator::Return(None));
+    assert_run(
+        &text,
+        &["ldr x8, [sp, #0]", "eor x8, x8, #1", "str x8, [sp, #8]"],
+    );
+}
+
+/// A branch loads its condition into `x8`, then `cbnz` to the then-block and `b` to the else-block.
+#[test]
+fn branch_loads_the_condition_into_x8() {
+    let module = module_of_blocks(
+        false,
+        vec![
+            block_of(
+                0,
+                vec![constant(0, 1)],
+                Terminator::Branch {
+                    cond: Temp(0),
+                    then_to: BlockId(1),
+                    else_to: BlockId(2),
+                },
+            ),
+            block_of(1, vec![], Terminator::Return(None)),
+            block_of(2, vec![], Terminator::Return(None)),
+        ],
+    );
+    assert_run(
+        &emit_ok(&module, FILE),
+        &["ldr x8, [sp, #0]", "cbnz x8, Lmain_bb1", "b Lmain_bb2"],
+    );
+}
+
+/// A call loads each argument straight into its argument register, calls, and stores `x0` in the result cell.
+#[test]
+fn call_loads_arguments_into_registers_and_stores_the_result() {
+    let call = Inst::Call {
+        dst: Some(Temp(2)),
+        func: "main".to_string(),
+        args: vec![Temp(0), Temp(1)],
+    };
+    let text = asm_of_insts(
+        vec![constant(0, 1), constant(1, 2), call],
+        Terminator::Return(None),
+    );
+    assert_run(
+        &text,
+        &[
+            "ldr x0, [sp, #0]",
+            "ldr x1, [sp, #8]",
+            "bl _em_main",
+            "str x0, [sp, #16]",
+        ],
+    );
+}
+
+/// A call without a result stores nothing after `bl`.
+#[test]
+fn call_without_a_result_stores_nothing() {
+    let call = Inst::Call {
+        dst: None,
+        func: "main".to_string(),
+        args: vec![],
+    };
+    let text = asm_of_insts(vec![call], Terminator::Return(None));
+    assert_run(&text, &["bl _em_main", "mov sp, x29"]);
+}
+
+/// A print loads its operand straight into `x0` and calls the helper for its kind.
+#[test]
+fn print_loads_x0_and_calls_the_helper() {
+    let print = Inst::Print {
+        src: Temp(0),
+        kind: PrintKind::I64,
+    };
+    let text = asm_of_insts(vec![constant(0, 5), print], Terminator::Return(None));
+    assert_run(&text, &["ldr x0, [sp, #0]", "bl _ember_rt_print_i64"]);
+}
+
+/// Returning a value loads it into `x0` before the epilogue.
+#[test]
+fn return_value_is_loaded_into_x0_before_the_epilogue() {
+    let module = module_of_blocks(
+        true,
+        vec![block_of(
+            0,
+            vec![constant(0, 5)],
+            Terminator::Return(Some(Temp(0))),
+        )],
+    );
+    assert_run(
+        &emit_ok(&module, FILE),
+        &[
+            "ldr x0, [sp, #0]",
+            "mov sp, x29",
+            "ldp x29, x30, [sp], #16",
+            "ret",
+        ],
+    );
+}
+
+/// A panic path loads the source line and column into `x0` and `x1` and the reason into `x2`, then calls the runtime.
+#[test]
+fn panic_path_passes_line_column_and_reason() {
+    let text = asm_of_insts(
+        vec![constant(0, 1), binary(1, BinOp::Add, 0, 0)],
+        Terminator::Return(None),
+    );
+    assert_run(
+        &text,
+        &[
+            "Lmain_panic0:",
+            "movz x0, #3",
+            "movz x1, #5",
+            "adrp x2, Lstr_overflow@PAGE",
+            "add x2, x2, Lstr_overflow@PAGEOFF",
+            "bl _ember_rt_panic",
+        ],
+    );
+}
+
+/// In a function with more than 4,096 cells the high half's cell is reached through `x17`.
+#[test]
+fn far_high_half_cell_is_addressed_through_x17() {
+    let text = asm_of_huge_main(&["print(i * i)"]);
+    let lines = trimmed_lines(&text);
+    let smulh = lines.iter().position(|line| *line == "smulh x8, x8, x9");
+    assert!(smulh.is_some(), "no smulh found");
+    let smulh = smulh.unwrap();
+    assert!(
+        lines[smulh + 1].starts_with("movz x17, #"),
+        "line after smulh is `{}`",
+        lines[smulh + 1]
+    );
+    assert_eq!(lines[smulh + 2], "str x8, [sp, x17]");
+}
+
+/// In a function with more than 4,096 cells the `MIN` constant's cell is reached through `x17`.
+#[test]
+fn far_min_constant_cell_is_addressed_through_x17() {
+    let text = asm_of_huge_main(&["z := 3", "print(i / z)"]);
+    let lines = trimmed_lines(&text);
+    let movk = lines
+        .iter()
+        .position(|line| *line == "movk x8, #32768, lsl #48");
+    assert!(movk.is_some(), "no MIN constant found");
+    let movk = movk.unwrap();
+    assert!(
+        lines[movk + 1].starts_with("movz x17, #"),
+        "line after movk is `{}`",
+        lines[movk + 1]
+    );
+    assert_eq!(lines[movk + 2], "str x8, [sp, x17]");
+}
+
+/// The frame of a function with more than 4,096 cells is still built in `x16`.
+#[test]
+fn far_frame_with_isel_registers_is_built_in_x16() {
+    let text = asm_of_huge_main(&["print(i * i)"]);
+    assert_contains(&text, "sub sp, sp, x16");
+}
+
+/// No `[sp, #offset]` in a function with more than 4,096 cells exceeds the 32760-byte immediate range.
+#[test]
+fn far_frame_never_prints_an_immediate_offset_above_32760() {
+    let text = asm_of_huge_main(&["print(i * i)", "z := 3", "print(i % z)"]);
+    for line in text.lines() {
+        let Some((_, rest)) = line.split_once("[sp, #") else {
+            continue;
+        };
+        // The prologue's `[sp, #-16]!` is a pre-index, not a frame offset.
+        let digits = rest.split(']').next().unwrap();
+        let Ok(offset) = digits.parse::<u64>() else {
+            continue;
+        };
+        assert!(offset <= 32760, "offset out of range in `{line}`");
+    }
+}
+
+/// A `mul` whose destination temp is `u32::MAX` (isel's own registers would not fit) is an internal error, not a panic.
+#[test]
+fn mul_into_the_largest_temp_is_an_internal_error() {
+    let insts = vec![constant(0, 1), binary(u32::MAX, BinOp::Mul, 0, 0)];
+    assert_internal_error(&module_of(insts, Terminator::Return(None)));
+}
+
+/// A `Const` into temp `u32::MAX` (the temp count would overflow) is an internal error, not a panic.
+#[test]
+fn const_into_the_largest_temp_is_an_internal_error() {
+    let insts = vec![constant(u32::MAX, 1)];
+    assert_internal_error(&module_of(insts, Terminator::Return(None)));
 }
