@@ -53,6 +53,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "arm64"
+version = "0.1.0"
+dependencies = [
+ "check",
+ "ir",
+ "parser",
+ "source",
+]
+
+[[package]]
 name = "ast"
 version = "0.1.0"
 dependencies = [

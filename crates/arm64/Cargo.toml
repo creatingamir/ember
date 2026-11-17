@@ -1,0 +1,17 @@
+[package]
+name = "arm64"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ir = { path = "../ir", version = "0.1.0" }
+source = { path = "../source", version = "0.1.0" }
+
+[dev-dependencies]
+check = { path = "../check", version = "0.1.0" }
+parser = { path = "../parser", version = "0.1.0" }
+
+[lints]
+workspace = true
