@@ -1,5 +1,7 @@
 //! The Ember lexer: turns source text into tokens.
 
+use std::fmt;
+
 use source::{Diagnostic, Span};
 
 /// The words that are reserved for future use and rejected today.
@@ -155,6 +157,105 @@ pub enum TokenKind {
     Newline,
     /// The end of the input.
     Eof,
+}
+
+impl TokenKind {
+    /// Returns the source spelling of a fixed token, or `None` for names, literals and markers.
+    fn spelling(&self) -> Option<&'static str> {
+        match self {
+            TokenKind::KwFn => Some("fn"),
+            TokenKind::KwStruct => Some("struct"),
+            TokenKind::KwEnum => Some("enum"),
+            TokenKind::KwConst => Some("const"),
+            TokenKind::KwPub => Some("pub"),
+            TokenKind::KwImport => Some("import"),
+            TokenKind::KwExtern => Some("extern"),
+            TokenKind::KwIf => Some("if"),
+            TokenKind::KwElse => Some("else"),
+            TokenKind::KwFor => Some("for"),
+            TokenKind::KwIn => Some("in"),
+            TokenKind::KwBreak => Some("break"),
+            TokenKind::KwContinue => Some("continue"),
+            TokenKind::KwMatch => Some("match"),
+            TokenKind::KwReturn => Some("return"),
+            TokenKind::KwDefer => Some("defer"),
+            TokenKind::KwArena => Some("arena"),
+            TokenKind::KwGrad => Some("grad"),
+            TokenKind::KwOn => Some("on"),
+            TokenKind::KwTest => Some("test"),
+            TokenKind::KwTrue => Some("true"),
+            TokenKind::KwFalse => Some("false"),
+            TokenKind::KwNone => Some("none"),
+            TokenKind::LParen => Some("("),
+            TokenKind::RParen => Some(")"),
+            TokenKind::LBracket => Some("["),
+            TokenKind::RBracket => Some("]"),
+            TokenKind::LBrace => Some("{"),
+            TokenKind::RBrace => Some("}"),
+            TokenKind::Comma => Some(","),
+            TokenKind::Colon => Some(":"),
+            TokenKind::Dot => Some("."),
+            TokenKind::Arrow => Some("->"),
+            TokenKind::FatArrow => Some("=>"),
+            TokenKind::Question => Some("?"),
+            TokenKind::Assign => Some("="),
+            TokenKind::ColonAssign => Some(":="),
+            TokenKind::PlusAssign => Some("+="),
+            TokenKind::MinusAssign => Some("-="),
+            TokenKind::StarAssign => Some("*="),
+            TokenKind::SlashAssign => Some("/="),
+            TokenKind::AtAssign => Some("@="),
+            TokenKind::Plus => Some("+"),
+            TokenKind::Minus => Some("-"),
+            TokenKind::Star => Some("*"),
+            TokenKind::Slash => Some("/"),
+            TokenKind::Percent => Some("%"),
+            TokenKind::At => Some("@"),
+            TokenKind::Bang => Some("!"),
+            TokenKind::Tilde => Some("~"),
+            TokenKind::Amp => Some("&"),
+            TokenKind::Pipe => Some("|"),
+            TokenKind::Caret => Some("^"),
+            TokenKind::Shl => Some("<<"),
+            TokenKind::Shr => Some(">>"),
+            TokenKind::EqEq => Some("=="),
+            TokenKind::NotEq => Some("!="),
+            TokenKind::Lt => Some("<"),
+            TokenKind::LtEq => Some("<="),
+            TokenKind::Gt => Some(">"),
+            TokenKind::GtEq => Some(">="),
+            TokenKind::AndAnd => Some("&&"),
+            TokenKind::OrOr => Some("||"),
+            TokenKind::DotDot => Some(".."),
+            TokenKind::DotDotEq => Some("..="),
+            TokenKind::Ident(_)
+            | TokenKind::Int(_)
+            | TokenKind::Float(_)
+            | TokenKind::Str(_)
+            | TokenKind::Newline
+            | TokenKind::Eof => None,
+        }
+    }
+}
+
+impl fmt::Display for TokenKind {
+    /// Describes the token for error messages, such as `` `fn` `` or `identifier `x``.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TokenKind::Ident(name) => write!(f, "identifier `{name}`"),
+            TokenKind::Int(_) => write!(f, "integer literal"),
+            TokenKind::Float(_) => write!(f, "float literal"),
+            TokenKind::Str(_) => write!(f, "string literal"),
+            TokenKind::Newline => write!(f, "newline"),
+            TokenKind::Eof => write!(f, "end of file"),
+            fixed => match fixed.spelling() {
+                Some(spelling) => write!(f, "`{spelling}`"),
+                // The compiler cannot see that the six kinds above are the only ones without a
+                // spelling, so this arm is required but never reached.
+                None => Ok(()),
+            },
+        }
+    }
 }
 
 /// A token and the part of the source it came from.
