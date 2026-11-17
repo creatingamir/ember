@@ -710,6 +710,14 @@ fn negating_an_unsigned_value_is_rejected_at_the_unary_expression() {
     }
 }
 
+/// Negating a parenthesized untyped sum for an unsigned type is an error at the whole `-(1 + 2)`, closing parenthesis included.
+#[test]
+fn negating_a_parenthesized_sum_for_an_unsigned_type_is_rejected_at_the_whole_expression() {
+    let src = typed_let("u8", "-(1 + 2)");
+    let message = "cannot negate a value of unsigned type `u8`";
+    assert_single_error(&src, message, "-(1 + 2)", 0);
+}
+
 /// Negating an untyped non-literal (`- -0`) that settles to an unsigned type is an error at the outer minus.
 #[test]
 fn negating_an_untyped_non_literal_for_an_unsigned_type_is_rejected() {

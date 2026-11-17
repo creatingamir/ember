@@ -249,7 +249,7 @@ fn printing_a_comparison_uses_print_bool() {
     assert_eq!(main_ir(&["fn main() {", "    print(1 < 2)", "}"]), expected);
 }
 
-/// A binary expression's location is its first operand's start, inside parentheses.
+/// A binary expression's location is its first operand's start; a parenthesized operand starts at its `(`.
 #[test]
 fn binary_location_is_the_start_of_the_expression() {
     let source = text(&[
@@ -265,9 +265,9 @@ fn binary_location_is_the_start_of_the_expression() {
         "bb0:",
         "  t0:i64 = load a",
         "  t1:i64 = load b",
-        "  t2:i64 = add.s t0, t1 @2:13",
+        "  t2:i64 = add.s t0, t1 @2:12",
         "  t3:i64 = load c",
-        "  t4:i64 = mul.s t2, t3 @2:13",
+        "  t4:i64 = mul.s t2, t3 @2:12",
         "  ret t4",
         "}",
     ]);

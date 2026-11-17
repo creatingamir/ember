@@ -1146,10 +1146,22 @@ fn call_span_includes_the_trailing_comma() {
     assert_eq!(parsed_expr("f(a,)").span, expr_span(0, 5));
 }
 
-/// A parenthesized expression keeps the span of the inner expression.
+/// A parenthesized expression spans its parentheses, though it leaves no node of its own.
 #[test]
-fn parenthesized_expression_keeps_the_inner_span() {
-    assert_eq!(parsed_expr("(a + b)").span, expr_span(1, 6));
+fn parenthesized_expression_spans_its_parentheses() {
+    assert_eq!(parsed_expr("(a + b)").span, expr_span(0, 7));
+}
+
+/// A unary minus on a parenthesized expression spans from the minus to the closing parenthesis.
+#[test]
+fn unary_minus_on_a_parenthesized_expression_spans_the_closing_parenthesis() {
+    assert_eq!(parsed_expr("-(1 + 2)").span, expr_span(0, 8));
+}
+
+/// Nested parentheses give the expression the span of the outermost pair.
+#[test]
+fn nested_parentheses_span_the_outer_pair() {
+    assert_eq!(parsed_expr("((a))").span, expr_span(0, 5));
 }
 
 /// A literal and a name span their own token.
@@ -2088,14 +2100,14 @@ fn parenthesized_assignment_span_includes_the_parentheses() {
     assert_eq!(first_stmt(&src).span, span_of(&src, "(x) = 1"));
 }
 
-/// An assignment to a parenthesized non-name is still an error at the left side.
+/// An assignment to a parenthesized non-name is still an error at the left side, parentheses included.
 #[test]
 fn cannot_assign_to_a_parenthesized_expression() {
     let src = main_source("(a + b) = 1");
     assert_error(
         &src,
         "cannot assign to this expression",
-        span_of(&src, "a + b"),
+        span_of(&src, "(a + b)"),
     );
 }
 

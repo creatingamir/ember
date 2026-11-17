@@ -674,11 +674,14 @@ impl Parser {
             }
             TokenKind::LParen => {
                 self.enter()?;
-                self.advance();
-                // Parentheses only group: they leave no node behind.
-                let inner = self.parse_expr()?;
-                self.expect(TokenKind::RParen)?;
+                let open = self.advance();
+                // Parentheses only group: they leave no node behind, but the inner
+                // expression's span grows to cover them, so that `-(1 + 2)` and
+                // `(1 + 2) * 3` include both parentheses in their own spans.
+                let mut inner = self.parse_expr()?;
+                let close = self.expect(TokenKind::RParen)?;
                 self.leave();
+                inner.span = Span::new(open.span.start, close.span.end);
                 Ok(inner)
             }
             TokenKind::Float(_) => Err(self.error_here("float literals are not supported yet")),

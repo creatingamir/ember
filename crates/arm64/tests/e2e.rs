@@ -1574,16 +1574,16 @@ fn nested_operation_reports_its_own_location() {
     assert_panics(&src, "integer overflow", "b * c", 0, "");
 }
 
-/// A parenthesized operation reports the start of its left operand, as parentheses make no node.
+/// A parenthesized operation reports the column of its opening parenthesis.
 #[test]
-fn parenthesized_operation_reports_the_left_operand_start() {
+fn parenthesized_operation_reports_the_opening_parenthesis() {
     let src = main_with(&[
         "a := 4611686018427387904",
         "b := 0",
         "c := 4",
         "print((a + b) * c)",
     ]);
-    assert_panics(&src, "integer overflow", "a + b", 0, "");
+    assert_panics(&src, "integer overflow", "(a + b)", 0, "");
 }
 
 /// A panic inside a called function reports the location in that function.
