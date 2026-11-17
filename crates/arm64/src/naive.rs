@@ -1,6 +1,6 @@
 //! The naive allocator: every virtual register lives in its own stack cell and is reloaded for each use.
 
-use crate::mir::{MFunction, MInst, Mem, Reg, RegRole, VReg, internal_error};
+use crate::mir::{Access, MFunction, MInst, Mem, Reg, RegRole, VReg, internal_error};
 use source::Diagnostic;
 
 /// The scratch registers `x8` to `x11`, handed out in this order, so one instruction reads at most four values.
@@ -47,19 +47,23 @@ fn rewrite_mov(dst: Reg, src: Reg, out: &mut Vec<MInst>) {
         (Reg::Phys(_), Reg::Virt(source)) => out.push(MInst::Load {
             dst,
             mem: Mem::Cell(source),
+            access: Access::Double,
         }),
         (Reg::Virt(target), Reg::Phys(_)) => out.push(MInst::Store {
             src,
             mem: Mem::Cell(target),
+            access: Access::Double,
         }),
         (Reg::Virt(target), Reg::Virt(source)) => {
             out.push(MInst::Load {
                 dst: scratch,
                 mem: Mem::Cell(source),
+                access: Access::Double,
             });
             out.push(MInst::Store {
                 src: scratch,
                 mem: Mem::Cell(target),
+                access: Access::Double,
             });
         }
         (Reg::Phys(_), Reg::Phys(_)) => out.push(MInst::Mov { dst, src }),
@@ -106,12 +110,14 @@ fn rewrite_with_scratch(
         out.push(MInst::Load {
             dst: scratch(index),
             mem: Mem::Cell(*vreg),
+            access: Access::Double,
         });
     }
     out.push(inst);
     Ok(written.map(|vreg| MInst::Store {
         src: scratch(0),
         mem: Mem::Cell(vreg),
+        access: Access::Double,
     }))
 }
 
@@ -123,6 +129,7 @@ fn scratch(index: usize) -> Reg {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mir::Size;
     use source::Span;
 
     /// A virtual register.
@@ -144,6 +151,7 @@ mod tests {
         MInst::Load {
             dst: Reg::phys(register),
             mem: Mem::Cell(VReg(vreg)),
+            access: Access::Double,
         }
     }
 
@@ -154,6 +162,7 @@ mod tests {
             dst: v(2),
             lhs: v(0),
             rhs: v(0),
+            size: Size::X,
         };
         let expected = vec![
             load(8, 0),
@@ -161,10 +170,12 @@ mod tests {
                 dst: Reg::phys(8),
                 lhs: Reg::phys(8),
                 rhs: Reg::phys(8),
+                size: Size::X,
             },
             MInst::Store {
                 src: Reg::phys(8),
                 mem: Mem::Cell(VReg(2)),
+                access: Access::Double,
             },
         ];
         assert_eq!(allocated(add), expected);
@@ -182,6 +193,7 @@ mod tests {
             MInst::Store {
                 src: Reg::phys(8),
                 mem: Mem::Cell(VReg(1)),
+                access: Access::Double,
             },
         ];
         assert_eq!(allocated(mov), expected);
@@ -194,7 +206,7 @@ mod tests {
             slot_count: 0,
             vreg_count: 4,
             span: Span::new(0, 0),
-            out_args: 0,
+            out_arg_bytes: 0,
             next_label: 0,
             insts,
             frame_size: 0,
@@ -208,6 +220,7 @@ mod tests {
             dst: v(2),
             lhs: v(0),
             rhs: v(1),
+            size: Size::X,
         };
         let panic_if = MInst::PanicIf {
             cond: crate::mir::Cond::Vs,
@@ -220,6 +233,7 @@ mod tests {
         let store = MInst::Store {
             src: Reg::phys(8),
             mem: Mem::Cell(VReg(2)),
+            access: Access::Double,
         };
         let after_panic_if = allocate(function_of(vec![add.clone(), panic_if.clone()]));
         let after_b_cond = allocate(function_of(vec![add, b_cond.clone()]));

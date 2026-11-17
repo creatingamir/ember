@@ -5,6 +5,8 @@ use crate::strings;
 
 /// Name of the helper that prints an integer.
 pub const PRINT_I64: &str = "_ember_rt_print_i64";
+/// Name of the helper that prints an unsigned integer.
+pub const PRINT_U64: &str = "_ember_rt_print_u64";
 /// Name of the helper that prints a bool.
 pub const PRINT_BOOL: &str = "_ember_rt_print_bool";
 /// Name of the helper that reports a panic and exits.
@@ -24,9 +26,10 @@ pub fn emit_main(asm: &mut Asm) {
     asm.epilogue();
 }
 
-/// Writes the three runtime helpers; they are local to the file.
+/// Writes the runtime helpers; they are local to the file.
 pub fn emit_helpers(asm: &mut Asm) {
     emit_print_i64(asm);
+    emit_print_u64(asm);
     emit_print_bool(asm);
     emit_panic(asm);
 }
@@ -40,12 +43,22 @@ fn start_helper(asm: &mut Asm, name: &str) {
 
 /// `_ember_rt_print_i64(x0)`: `printf("%lld\n", x0)`.
 fn emit_print_i64(asm: &mut Asm) {
-    start_helper(asm, PRINT_I64);
+    emit_print_integer(asm, PRINT_I64, strings::FMT_I64);
+}
+
+/// `_ember_rt_print_u64(x0)`: `printf("%llu\n", x0)`.
+fn emit_print_u64(asm: &mut Asm) {
+    emit_print_integer(asm, PRINT_U64, strings::FMT_U64);
+}
+
+/// A helper that prints `x0` with the `printf` format at `format`.
+fn emit_print_integer(asm: &mut Asm, name: &str, format: &str) {
+    start_helper(asm, name);
     // On Apple ARM64 the variadic arguments of printf go on the stack, not in registers.
     // 16 bytes keep sp 16-byte aligned.
     asm.inst("sub sp, sp, #16");
     asm.inst("str x0, [sp]");
-    asm.load_address("x0", strings::FMT_I64);
+    asm.load_address("x0", format);
     asm.inst("bl _printf");
     asm.epilogue();
 }

@@ -4,6 +4,8 @@ use crate::asm::Asm;
 
 /// Label of the `printf` format for an integer.
 pub const FMT_I64: &str = "Lstr_fmt_i64";
+/// Label of the `printf` format for an unsigned integer.
+pub const FMT_U64: &str = "Lstr_fmt_u64";
 /// Label of the text `true`.
 pub const TRUE: &str = "Lstr_true";
 /// Label of the text `false`.
@@ -21,6 +23,7 @@ pub const FILE: &str = "Lstr_file";
 pub fn emit_strings(asm: &mut Asm, file_name: &str) {
     asm.directive(".section __TEXT,__cstring,cstring_literals");
     emit_string(asm, FMT_I64, "%lld\\n");
+    emit_string(asm, FMT_U64, "%llu\\n");
     // `puts` adds the newline itself.
     emit_string(asm, TRUE, "true");
     emit_string(asm, FALSE, "false");

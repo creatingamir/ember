@@ -151,7 +151,7 @@ mod tests {
             slot_count: 0,
             vreg_count: 0,
             span: Span::new(0, 0),
-            out_args: 0,
+            out_arg_bytes: 0,
             next_label: 10,
             insts,
             frame_size: 0,

@@ -230,6 +230,8 @@ pub enum BinOp {
 pub enum PrintKind {
     /// As a signed 64-bit integer.
     I64,
+    /// As an unsigned 64-bit integer.
+    U64,
     /// As `true` or `false`.
     Bool,
 }

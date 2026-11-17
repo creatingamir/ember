@@ -1,9 +1,11 @@
 //! Instruction selection: turns an IR function into MIR over virtual registers.
 
-use ir::{BinOp, BlockId, Function, Inst, Loc, PrintKind, Sign, SlotId, Temp, Terminator};
+mod arith;
+
+use ir::{BlockId, Function, Inst, IrType, Loc, PrintKind, Sign, SlotId, Temp, Terminator};
 use source::Diagnostic;
 
-use crate::mir::{Cond, MFunction, MInst, Mem, Reg, VReg, internal_error};
+use crate::mir::{Access, Cond, MFunction, MInst, Mem, Reg, Size, VReg, internal_error};
 use crate::runtime;
 use crate::strings;
 
@@ -19,7 +21,7 @@ pub fn select(function: &Function) -> Result<MFunction, Diagnostic> {
         slot_count: function.slots.len() as u32,
         vreg_count: selector.next_vreg,
         span: function.span,
-        out_args: selector.out_args,
+        out_arg_bytes: selector.out_arg_bytes,
         next_label: selector.next_label,
         insts: selector.insts,
         frame_size: 0,
@@ -63,8 +65,8 @@ struct Selector<'a> {
     insts: Vec<MInst>,
     /// The number of the next virtual register to hand out; starts after the IR temps.
     next_vreg: u32,
-    /// The most stack arguments of any call so far.
-    out_args: u32,
+    /// The end of the largest outgoing stack-argument area of any call so far, in bytes.
+    out_arg_bytes: u32,
     /// Numbers the local labels (`ok` and `panic`) of this function.
     next_label: u32,
     /// The panic paths still to be written after the body.
@@ -78,7 +80,7 @@ impl<'a> Selector<'a> {
             function,
             insts: Vec::new(),
             next_vreg: count_temps(function),
-            out_args: 0,
+            out_arg_bytes: 0,
             next_label: 0,
             panics: Vec::new(),
         }
@@ -87,22 +89,35 @@ impl<'a> Selector<'a> {
     /// Selects the whole function: prologue, parameter stores, blocks and panic paths.
     fn select_function(&mut self) -> Result<(), Diagnostic> {
         self.insts.push(MInst::Prologue);
+        // Stack parameters are packed after each other, from offset 0 of the argument area.
+        let mut stack_cursor = 0;
         for (index, param) in self.function.params.iter().enumerate() {
-            let mem = self.slot(param.slot)?;
+            // A parameter must name one of the function's slots.
+            if param.slot.0 as usize >= self.function.slots.len() {
+                return Err(internal_error("a parameter does not exist"));
+            }
+            let mem = Mem::Slot(param.slot);
+            let access = store_access(param.ty);
             if index < MAX_REGISTER_ARGS {
                 self.insts.push(MInst::Store {
                     src: Reg::phys(index as u8),
                     mem,
+                    access,
                 });
             } else {
                 // A stack parameter is copied into its slot through a new virtual register.
                 let copy = self.new_vreg()?;
-                let stack_index = (index - MAX_REGISTER_ARGS) as u32;
+                let offset = next_stack_offset(&mut stack_cursor, param.ty);
                 self.insts.push(MInst::Load {
                     dst: copy,
-                    mem: Mem::InArg(stack_index),
+                    mem: Mem::InArg { offset },
+                    access: load_access(param.ty, param.sign),
                 });
-                self.insts.push(MInst::Store { src: copy, mem });
+                self.insts.push(MInst::Store {
+                    src: copy,
+                    mem,
+                    access,
+                });
             }
         }
         let function = self.function;
@@ -151,28 +166,42 @@ impl<'a> Selector<'a> {
         Ok(reg)
     }
 
+    /// The type of a temp; a temp without a type is an internal error.
+    fn temp_type(&self, temp: Temp) -> Result<IrType, Diagnostic> {
+        match self.function.temp_types.get(temp.0 as usize) {
+            Some(ty) => Ok(*ty),
+            None => Err(internal_error("a temp has no type")),
+        }
+    }
+
     /// Selects one IR instruction.
     fn select_inst(&mut self, inst: &Inst) -> Result<(), Diagnostic> {
         match inst {
             Inst::Const { dst, value } => {
+                let size = size_of(self.temp_type(*dst)?);
                 // The bit pattern is what matters, so a negative value is cast as is.
                 self.insts.push(MInst::MovImm {
                     dst: virt(*dst),
                     value: *value as u64,
+                    size,
                 });
             }
-            Inst::Load { dst, slot, .. } => {
+            Inst::Load { dst, slot, sign } => {
                 let mem = self.slot(*slot)?;
+                let access = load_access(self.temp_type(*dst)?, *sign);
                 self.insts.push(MInst::Load {
                     dst: virt(*dst),
                     mem,
+                    access,
                 });
             }
             Inst::Store { slot, src } => {
                 let mem = self.slot(*slot)?;
+                let access = store_access(self.temp_type(*src)?);
                 self.insts.push(MInst::Store {
                     src: virt(*src),
                     mem,
+                    access,
                 });
             }
             Inst::Binary {
@@ -181,13 +210,15 @@ impl<'a> Selector<'a> {
                 lhs,
                 rhs,
                 loc,
-            } => self.select_binary(virt(*dst), *op, virt(*lhs), virt(*rhs), *loc)?,
+            } => {
+                // Both operands have the same type.
+                let ty = self.temp_type(*lhs)?;
+                let regs = [virt(*dst), virt(*lhs), virt(*rhs)];
+                self.select_binary(regs, *op, ty, *loc)?;
+            }
             Inst::Neg { dst, src, loc } => {
-                self.insts.push(MInst::Negs {
-                    dst: virt(*dst),
-                    src: virt(*src),
-                });
-                self.branch_to_panic(Cond::Vs, PanicReason::Overflow, *loc);
+                let ty = self.temp_type(*src)?;
+                self.select_neg(virt(*dst), virt(*src), ty, *loc)?;
             }
             Inst::Not { dst, src } => {
                 self.insts.push(MInst::EorOne {
@@ -196,136 +227,40 @@ impl<'a> Selector<'a> {
                 });
             }
             Inst::Call { dst, func, args } => self.select_call(*dst, func, args)?,
-            Inst::Print { src, kind } => {
-                let helper = match kind {
-                    PrintKind::I64 => runtime::PRINT_I64,
-                    PrintKind::Bool => runtime::PRINT_BOOL,
-                };
-                self.insts.push(MInst::Mov {
-                    dst: Reg::phys(0),
-                    src: virt(*src),
-                });
-                self.insts.push(MInst::Bl {
-                    symbol: helper.to_string(),
-                    args: 1,
-                });
-            }
+            Inst::Print { src, kind } => self.select_print(*src, *kind)?,
         }
         Ok(())
     }
 
-    /// Selects a binary operation.
-    fn select_binary(
-        &mut self,
-        dst: Reg,
-        op: BinOp,
-        lhs: Reg,
-        rhs: Reg,
-        loc: Loc,
-    ) -> Result<(), Diagnostic> {
-        match op {
-            BinOp::Add(Sign::Signed) => {
-                self.insts.push(MInst::Adds { dst, lhs, rhs });
-                self.branch_to_panic(Cond::Vs, PanicReason::Overflow, loc);
+    /// Selects `print`: the value goes to `x0`, extended to 64 bits when it is narrower, then the helper is called.
+    fn select_print(&mut self, src: Temp, kind: PrintKind) -> Result<(), Diagnostic> {
+        let ty = self.temp_type(src)?;
+        self.insts.push(MInst::Mov {
+            dst: Reg::phys(0),
+            src: virt(src),
+        });
+        // A value of 32 bits or fewer has undefined upper bits in its register.
+        let narrow = ty != IrType::I64;
+        let x0 = Reg::phys(0);
+        let helper = match kind {
+            PrintKind::I64 => {
+                if narrow {
+                    self.insts.push(MInst::Sxtw { dst: x0, src: x0 });
+                }
+                runtime::PRINT_I64
             }
-            BinOp::Sub(Sign::Signed) => {
-                self.insts.push(MInst::Subs { dst, lhs, rhs });
-                self.branch_to_panic(Cond::Vs, PanicReason::Overflow, loc);
+            PrintKind::U64 if !narrow => runtime::PRINT_U64,
+            PrintKind::U64 => {
+                self.insts.push(MInst::Uxtw { dst: x0, src: x0 });
+                runtime::PRINT_I64
             }
-            BinOp::Mul(Sign::Signed) => self.select_mul(dst, lhs, rhs, loc)?,
-            BinOp::Div(Sign::Signed) => self.select_div(dst, lhs, rhs, loc, false)?,
-            BinOp::Rem(Sign::Signed) => self.select_div(dst, lhs, rhs, loc, true)?,
-            BinOp::Eq => self.select_compare(dst, lhs, rhs, Cond::Eq),
-            BinOp::Ne => self.select_compare(dst, lhs, rhs, Cond::Ne),
-            BinOp::Lt(Sign::Signed) => self.select_compare(dst, lhs, rhs, Cond::Lt),
-            BinOp::Le(Sign::Signed) => self.select_compare(dst, lhs, rhs, Cond::Le),
-            BinOp::Gt(Sign::Signed) => self.select_compare(dst, lhs, rhs, Cond::Gt),
-            BinOp::Ge(Sign::Signed) => self.select_compare(dst, lhs, rhs, Cond::Ge),
-            BinOp::Add(Sign::Unsigned)
-            | BinOp::Sub(Sign::Unsigned)
-            | BinOp::Mul(Sign::Unsigned)
-            | BinOp::Div(Sign::Unsigned)
-            | BinOp::Rem(Sign::Unsigned)
-            | BinOp::Lt(Sign::Unsigned)
-            | BinOp::Le(Sign::Unsigned)
-            | BinOp::Gt(Sign::Unsigned)
-            | BinOp::Ge(Sign::Unsigned) => {
-                return Err(internal_error("unsigned operations are not supported yet"));
-            }
-        }
+            PrintKind::Bool => runtime::PRINT_BOOL,
+        };
+        self.insts.push(MInst::Bl {
+            symbol: helper.to_string(),
+            args: 1,
+        });
         Ok(())
-    }
-
-    /// Selects a checked multiplication.
-    fn select_mul(&mut self, dst: Reg, lhs: Reg, rhs: Reg, loc: Loc) -> Result<(), Diagnostic> {
-        let high = self.new_vreg()?;
-        // The full 128-bit product is `high:dst`. It fits in 64 bits exactly when
-        // the high half is the sign extension of the low half (all zeros or all ones).
-        self.insts.push(MInst::Mul { dst, lhs, rhs });
-        self.insts.push(MInst::Smulh {
-            dst: high,
-            lhs,
-            rhs,
-        });
-        self.insts.push(MInst::CmpAsr63 {
-            lhs: high,
-            rhs: dst,
-        });
-        self.branch_to_panic(Cond::Ne, PanicReason::Overflow, loc);
-        Ok(())
-    }
-
-    /// Selects a checked division, or a remainder when `remainder` is set.
-    fn select_div(
-        &mut self,
-        dst: Reg,
-        lhs: Reg,
-        rhs: Reg,
-        loc: Loc,
-        remainder: bool,
-    ) -> Result<(), Diagnostic> {
-        // Zero is checked first, so `i64::MIN / 0` reports "division by zero".
-        self.insts.push(MInst::CmpImm { lhs: rhs, imm: 0 });
-        self.branch_to_panic(Cond::Eq, PanicReason::DivByZero, loc);
-        // `i64::MIN / -1` does not fit in an i64 (and `sdiv` would silently return i64::MIN).
-        let ok = self.new_label("ok");
-        self.insts.push(MInst::CmnImm { lhs: rhs, imm: 1 });
-        self.insts.push(MInst::BCond {
-            cond: Cond::Ne,
-            target: ok.clone(),
-        });
-        let min = self.new_vreg()?;
-        self.insts.push(MInst::MovImm {
-            dst: min,
-            value: i64::MIN as u64,
-        });
-        self.insts.push(MInst::Cmp { lhs, rhs: min });
-        self.branch_to_panic(Cond::Eq, PanicReason::Overflow, loc);
-        self.insts.push(MInst::Label(ok));
-        if remainder {
-            // remainder = dividend - quotient * divisor
-            let quotient = self.new_vreg()?;
-            self.insts.push(MInst::Sdiv {
-                dst: quotient,
-                lhs,
-                rhs,
-            });
-            self.insts.push(MInst::Msub {
-                dst,
-                mul_lhs: quotient,
-                mul_rhs: rhs,
-                minuend: lhs,
-            });
-        } else {
-            self.insts.push(MInst::Sdiv { dst, lhs, rhs });
-        }
-        Ok(())
-    }
-
-    /// Selects a signed comparison that leaves 0 or 1 in `dst`.
-    fn select_compare(&mut self, dst: Reg, lhs: Reg, rhs: Reg, cond: Cond) {
-        self.insts.push(MInst::Cmp { lhs, rhs });
-        self.insts.push(MInst::Cset { dst, cond });
     }
 
     /// Selects a call: arguments into `x0` to `x7`, then `bl`, then the result from `x0`.
@@ -336,14 +271,18 @@ impl<'a> Selector<'a> {
         args: &[Temp],
     ) -> Result<(), Diagnostic> {
         // The stack arguments go first, so that `x0` to `x7` are set last and nothing can clobber them.
-        let stack_args = args.len().saturating_sub(MAX_REGISTER_ARGS) as u32;
-        self.out_args = self.out_args.max(stack_args);
-        for (index, arg) in args.iter().enumerate().skip(MAX_REGISTER_ARGS) {
+        // They are packed after each other, each aligned to its own size (Apple's rule).
+        let mut stack_cursor = 0;
+        for arg in args.iter().skip(MAX_REGISTER_ARGS) {
+            let ty = self.temp_type(*arg)?;
+            let offset = next_stack_offset(&mut stack_cursor, ty);
             self.insts.push(MInst::Store {
                 src: virt(*arg),
-                mem: Mem::OutArg((index - MAX_REGISTER_ARGS) as u32),
+                mem: Mem::OutArg { offset },
+                access: store_access(ty),
             });
         }
+        self.out_arg_bytes = self.out_arg_bytes.max(stack_cursor);
         for (index, arg) in args.iter().enumerate().take(MAX_REGISTER_ARGS) {
             self.insts.push(MInst::Mov {
                 dst: Reg::phys(index as u8),
@@ -415,10 +354,12 @@ impl<'a> Selector<'a> {
             self.insts.push(MInst::MovImm {
                 dst: Reg::phys(0),
                 value: u64::from(path.loc.line),
+                size: Size::X,
             });
             self.insts.push(MInst::MovImm {
                 dst: Reg::phys(1),
                 value: u64::from(path.loc.col),
+                size: Size::X,
             });
             self.insts.push(MInst::LoadAddress {
                 dst: Reg::phys(2),
@@ -430,6 +371,44 @@ impl<'a> Selector<'a> {
             });
         }
     }
+}
+
+/// The register size an operation on values of this type uses: `w` for 8 to 32 bits, `x` for 64.
+fn size_of(ty: IrType) -> Size {
+    match ty {
+        IrType::I64 => Size::X,
+        IrType::I8 | IrType::I16 | IrType::I32 => Size::W,
+    }
+}
+
+/// How a load of a value of this type moves memory; 8- and 16-bit values extend as `sign` says.
+fn load_access(ty: IrType, sign: Sign) -> Access {
+    let signed = sign == Sign::Signed;
+    match ty {
+        IrType::I8 => Access::Byte { signed },
+        IrType::I16 => Access::Half { signed },
+        IrType::I32 => Access::Word,
+        IrType::I64 => Access::Double,
+    }
+}
+
+/// How a store of a value of this type moves memory.
+fn store_access(ty: IrType) -> Access {
+    match ty {
+        IrType::I8 => Access::Byte { signed: false },
+        IrType::I16 => Access::Half { signed: false },
+        IrType::I32 => Access::Word,
+        IrType::I64 => Access::Double,
+    }
+}
+
+/// The offset of the next stack argument of type `ty`: aligned to its size. Moves `cursor` past it.
+fn next_stack_offset(cursor: &mut u32, ty: IrType) -> u32 {
+    let bytes = ty.bytes();
+    // A saturated offset only happens for an absurd argument count, which the frame limit rejects.
+    let offset = cursor.checked_next_multiple_of(bytes).unwrap_or(u32::MAX);
+    *cursor = offset.saturating_add(bytes);
+    offset
 }
 
 /// The virtual register of an IR temp.

@@ -228,6 +228,7 @@ fn can_panic(op: BinOp) -> bool {
 fn print_kind_name(kind: PrintKind) -> &'static str {
     match kind {
         PrintKind::I64 => "i64",
+        PrintKind::U64 => "u64",
         PrintKind::Bool => "bool",
     }
 }

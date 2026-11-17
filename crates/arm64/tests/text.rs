@@ -6,8 +6,9 @@
 mod common;
 
 use common::{
-    FILE, asm, asm_named, binary, block_of, constant, counter_program, emit_ok, i64_param,
-    i64_slot, i64_temp_types, main_module, main_with, program, unreachable_blocks,
+    FILE, asm, asm_named, assert_contains, assert_lacks, assert_run, binary, block_of, constant,
+    counter_program, emit_ok, function_text, i64_param, i64_slot, i64_temp_types, main_module,
+    main_with, program, trimmed_lines, unreachable_blocks,
 };
 use ir::{
     BinOp, Block, BlockId, Inst, IrType, Loc, Module, PrintKind, Sign, SlotId, Temp, Terminator,
@@ -33,16 +34,6 @@ fn fib_program() -> String {
 /// Assembly for a `main` with the given statement lines.
 fn asm_of_main(body: &[&str]) -> String {
     asm(&main_with(body))
-}
-
-/// Asserts that `text` contains `needle`, showing the text when it does not.
-fn assert_contains(text: &str, needle: &str) {
-    assert!(text.contains(needle), "`{needle}` not found in:\n{text}");
-}
-
-/// Asserts that `text` does not contain `needle`, showing the text when it does.
-fn assert_lacks(text: &str, needle: &str) {
-    assert!(!text.contains(needle), "`{needle}` found in:\n{text}");
 }
 
 /// Counts the lines of `text` that equal `line` once trimmed.
@@ -565,31 +556,6 @@ fn file_name_keeps_printable_ascii() {
 // M2.1a: the machine IR and the naive allocator. The MIR modules are private to the crate, so
 // these tests go through `arm64::emit` and check the exact text the naive allocator produces.
 // ---------------------------------------------------------------------------------------------
-
-/// The trimmed lines of `text`.
-fn trimmed_lines(text: &str) -> Vec<&str> {
-    text.lines().map(str::trim).collect()
-}
-
-/// Asserts that `run` appears in `text` as consecutive lines (ignoring indentation).
-fn assert_run(text: &str, run: &[&str]) {
-    let lines = trimmed_lines(text);
-    let found = lines.windows(run.len()).any(|window| window == run);
-    assert!(found, "lines {run:#?} not found consecutively in:\n{text}");
-}
-
-/// The lines of one function's body: everything after `symbol:` up to the next directive or symbol.
-fn function_text(text: &str, symbol: &str) -> String {
-    let header = format!("{symbol}:");
-    let body: Vec<&str> = text
-        .lines()
-        .skip_while(|line| *line != header)
-        .skip(1)
-        .take_while(|line| !line.starts_with('.') && !line.starts_with('_'))
-        .collect();
-    assert!(!body.is_empty(), "`{symbol}` not found in:\n{text}");
-    body.join("\n")
-}
 
 /// A program with `fn f(a: i64, b: i64) -> i64 { return a OP b }` and a `main` that calls it.
 fn binary_program(op: &str) -> String {

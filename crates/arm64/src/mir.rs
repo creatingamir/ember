@@ -27,6 +27,67 @@ impl Reg {
     }
 }
 
+/// The width of an operation: `w` (32-bit) or `x` (64-bit) register names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Size {
+    /// `w` registers; the top 32 bits of the destination are cleared.
+    W,
+    /// `x` registers.
+    X,
+}
+
+impl Size {
+    /// The part of `value` that a constant load of this size writes: all 64 bits, or the low 32.
+    pub fn truncate(self, value: u64) -> u64 {
+        match self {
+            Size::W => value & 0xffff_ffff,
+            Size::X => value,
+        }
+    }
+}
+
+/// How a load or store moves memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    /// One byte: `ldrsb`/`ldrb` into a `w` register, `strb`.
+    Byte {
+        /// Whether a load sign-extends (`ldrsb`) or zero-extends (`ldrb`).
+        signed: bool,
+    },
+    /// Two bytes: `ldrsh`/`ldrh`, `strh`.
+    Half {
+        /// Whether a load sign-extends (`ldrsh`) or zero-extends (`ldrh`).
+        signed: bool,
+    },
+    /// Four bytes: `ldr w`/`str w`.
+    Word,
+    /// Eight bytes: `ldr x`/`str x`.
+    Double,
+}
+
+impl Access {
+    /// The number of bytes moved: 1, 2, 4 or 8.
+    pub fn bytes(self) -> u64 {
+        match self {
+            Access::Byte { .. } => 1,
+            Access::Half { .. } => 2,
+            Access::Word => 4,
+            Access::Double => 8,
+        }
+    }
+}
+
+/// How `CmpExt` extends its second operand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ext {
+    /// Sign-extend the low byte.
+    Sxtb,
+    /// Sign-extend the low half-word.
+    Sxth,
+    /// Sign-extend the low word.
+    Sxtw,
+}
+
 /// The register an address is relative to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Base {
@@ -43,11 +104,17 @@ pub enum Mem {
     Slot(ir::SlotId),
     /// The cell of a virtual register (only the allocator creates these).
     Cell(VReg),
-    /// Incoming stack argument `j` (argument number `8 + j`): `[x29, #16 + 8j]`.
-    InArg(u32),
-    /// Outgoing stack argument `j` of a call: `[sp, #8j]`.
-    OutArg(u32),
-    /// `[base, #offset]` when the offset is at most 32760, else `[base, x17]` after `x17` is loaded.
+    /// An incoming stack argument at a byte offset into the argument area: `[x29, #16 + offset]`.
+    InArg {
+        /// The byte offset of the argument, packed by Apple's rule.
+        offset: u32,
+    },
+    /// An outgoing stack argument at a byte offset into the argument area: `[sp, #offset]`.
+    OutArg {
+        /// The byte offset of the argument, packed by Apple's rule.
+        offset: u32,
+    },
+    /// `[base, #offset]` when the offset fits the access, else `[base, x17]` after `x17` is loaded.
     Address {
         /// The register the offset is added to.
         base: Base,
@@ -71,6 +138,14 @@ pub enum Cond {
     Gt,
     /// Signed greater than or equal.
     Ge,
+    /// Unsigned lower (carry clear).
+    Lo,
+    /// Unsigned lower or the same.
+    Ls,
+    /// Unsigned higher.
+    Hi,
+    /// Unsigned higher or the same (carry set).
+    Hs,
     /// Signed overflow.
     Vs,
     /// No signed overflow; only branch relaxation creates it.
@@ -87,6 +162,10 @@ impl Cond {
             Cond::Ge => Cond::Lt,
             Cond::Le => Cond::Gt,
             Cond::Gt => Cond::Le,
+            Cond::Lo => Cond::Hs,
+            Cond::Hs => Cond::Lo,
+            Cond::Ls => Cond::Hi,
+            Cond::Hi => Cond::Ls,
             Cond::Vs => Cond::Vc,
             Cond::Vc => Cond::Vs,
         }
@@ -113,6 +192,8 @@ pub enum MInst {
         dst: Reg,
         /// The 64-bit constant (a negative `i64` is kept as its bit pattern).
         value: u64,
+        /// `W` loads the low 32 bits of `value` and clears the rest.
+        size: Size,
     },
     /// `mov dst, src` (both physical after allocation).
     Mov {
@@ -134,6 +215,8 @@ pub enum MInst {
         dst: Reg,
         /// The memory read.
         mem: Mem,
+        /// How many bytes are read, and whether they are extended with their sign.
+        access: Access,
     },
     /// `str src, <mem>`
     Store {
@@ -141,6 +224,8 @@ pub enum MInst {
         src: Reg,
         /// The memory written.
         mem: Mem,
+        /// How many bytes are written.
+        access: Access,
     },
     /// `adds dst, lhs, rhs`
     Adds {
@@ -150,6 +235,8 @@ pub enum MInst {
         lhs: Reg,
         /// The right operand.
         rhs: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
     },
     /// `subs dst, lhs, rhs`
     Subs {
@@ -159,6 +246,8 @@ pub enum MInst {
         lhs: Reg,
         /// The right operand.
         rhs: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
     },
     /// `negs dst, src`
     Negs {
@@ -166,6 +255,8 @@ pub enum MInst {
         dst: Reg,
         /// The operand.
         src: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
     },
     /// `mul dst, lhs, rhs`
     Mul {
@@ -175,6 +266,8 @@ pub enum MInst {
         lhs: Reg,
         /// The right operand.
         rhs: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
     },
     /// `smulh dst, lhs, rhs`
     Smulh {
@@ -193,6 +286,8 @@ pub enum MInst {
         lhs: Reg,
         /// The divisor.
         rhs: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
     },
     /// `msub dst, mul_lhs, mul_rhs, minuend` (dst = minuend - mul_lhs * mul_rhs)
     Msub {
@@ -204,6 +299,111 @@ pub enum MInst {
         mul_rhs: Reg,
         /// The value the product is subtracted from.
         minuend: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
+    },
+    /// `add dst, lhs, rhs` (no flags)
+    Add {
+        /// The sum.
+        dst: Reg,
+        /// The left operand.
+        lhs: Reg,
+        /// The right operand.
+        rhs: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
+    },
+    /// `sub dst, lhs, rhs` (no flags)
+    Sub {
+        /// The difference.
+        dst: Reg,
+        /// The left operand.
+        lhs: Reg,
+        /// The right operand.
+        rhs: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
+    },
+    /// `neg dst, src` (no flags)
+    Neg {
+        /// The negated value.
+        dst: Reg,
+        /// The operand.
+        src: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
+    },
+    /// `udiv dst, lhs, rhs`
+    Udiv {
+        /// The quotient.
+        dst: Reg,
+        /// The dividend.
+        lhs: Reg,
+        /// The divisor.
+        rhs: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
+    },
+    /// `umulh dst, lhs, rhs` (always `x`)
+    Umulh {
+        /// The high 64 bits of the unsigned product.
+        dst: Reg,
+        /// The left operand.
+        lhs: Reg,
+        /// The right operand.
+        rhs: Reg,
+    },
+    /// `smull dst, lhs, rhs`: a 64-bit signed product of two `w` operands.
+    Smull {
+        /// The `x` result.
+        dst: Reg,
+        /// The left `w` operand.
+        lhs: Reg,
+        /// The right `w` operand.
+        rhs: Reg,
+    },
+    /// `umull dst, lhs, rhs`: a 64-bit unsigned product of two `w` operands.
+    Umull {
+        /// The `x` result.
+        dst: Reg,
+        /// The left `w` operand.
+        lhs: Reg,
+        /// The right `w` operand.
+        rhs: Reg,
+    },
+    /// `cmp lhs, rhs, <ext>`: compares `lhs` with the extension of the low part of `rhs`.
+    CmpExt {
+        /// The left operand, named as `size` says.
+        lhs: Reg,
+        /// The right operand, always a `w` register.
+        rhs: Reg,
+        /// How the right operand is extended.
+        ext: Ext,
+        /// Whether `lhs` is a `w` or an `x` register.
+        size: Size,
+    },
+    /// `tst reg, #imm`: sets the flags from `reg & imm`.
+    Tst {
+        /// The register tested.
+        reg: Reg,
+        /// The mask, which must be a valid logical immediate.
+        imm: u64,
+        /// Whether `reg` is a `w` or an `x` register.
+        size: Size,
+    },
+    /// `sxtw dst, src`: sign-extends a `w` register into an `x` register.
+    Sxtw {
+        /// The `x` result.
+        dst: Reg,
+        /// The `w` source.
+        src: Reg,
+    },
+    /// `mov dst, src` on `w` registers, which zero-extends into the `x` register.
+    Uxtw {
+        /// The `x` result.
+        dst: Reg,
+        /// The `w` source.
+        src: Reg,
     },
     /// `cmp lhs, rhs`
     Cmp {
@@ -211,6 +411,8 @@ pub enum MInst {
         lhs: Reg,
         /// The right operand.
         rhs: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
     },
     /// `cmp lhs, rhs, asr #63`
     CmpAsr63 {
@@ -225,6 +427,8 @@ pub enum MInst {
         lhs: Reg,
         /// The 12-bit unsigned constant.
         imm: u16,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
     },
     /// `cmn lhs, #imm` (compares with the negated constant)
     CmnImm {
@@ -232,6 +436,8 @@ pub enum MInst {
         lhs: Reg,
         /// The 12-bit unsigned constant.
         imm: u16,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
     },
     /// `cset dst, <cond>`
     Cset {
@@ -310,17 +516,28 @@ impl MInst {
             | MInst::Cset { dst, .. } => {
                 visit(dst, Def);
             }
-            MInst::Mov { dst, src } | MInst::Negs { dst, src } | MInst::EorOne { dst, src } => {
+            MInst::Mov { dst, src }
+            | MInst::Negs { dst, src, .. }
+            | MInst::Neg { dst, src, .. }
+            | MInst::Sxtw { dst, src }
+            | MInst::Uxtw { dst, src }
+            | MInst::EorOne { dst, src } => {
                 visit(dst, Def);
                 visit(src, Use);
             }
             MInst::Load { dst, .. } => visit(dst, Def),
             MInst::Store { src, .. } => visit(src, Use),
-            MInst::Adds { dst, lhs, rhs }
-            | MInst::Subs { dst, lhs, rhs }
-            | MInst::Mul { dst, lhs, rhs }
+            MInst::Adds { dst, lhs, rhs, .. }
+            | MInst::Subs { dst, lhs, rhs, .. }
+            | MInst::Add { dst, lhs, rhs, .. }
+            | MInst::Sub { dst, lhs, rhs, .. }
+            | MInst::Mul { dst, lhs, rhs, .. }
             | MInst::Smulh { dst, lhs, rhs }
-            | MInst::Sdiv { dst, lhs, rhs } => {
+            | MInst::Umulh { dst, lhs, rhs }
+            | MInst::Smull { dst, lhs, rhs }
+            | MInst::Umull { dst, lhs, rhs }
+            | MInst::Sdiv { dst, lhs, rhs, .. }
+            | MInst::Udiv { dst, lhs, rhs, .. } => {
                 visit(dst, Def);
                 visit(lhs, Use);
                 visit(rhs, Use);
@@ -330,17 +547,21 @@ impl MInst {
                 mul_lhs,
                 mul_rhs,
                 minuend,
+                ..
             } => {
                 visit(dst, Def);
                 visit(mul_lhs, Use);
                 visit(mul_rhs, Use);
                 visit(minuend, Use);
             }
-            MInst::Cmp { lhs, rhs } | MInst::CmpAsr63 { lhs, rhs } => {
+            MInst::Cmp { lhs, rhs, .. }
+            | MInst::CmpAsr63 { lhs, rhs }
+            | MInst::CmpExt { lhs, rhs, .. } => {
                 visit(lhs, Use);
                 visit(rhs, Use);
             }
             MInst::CmpImm { lhs, .. } | MInst::CmnImm { lhs, .. } => visit(lhs, Use),
+            MInst::Tst { reg, .. } => visit(reg, Use),
             MInst::Cbnz { reg, .. } | MInst::Cbz { reg, .. } => visit(reg, Use),
             MInst::Bl { args, .. } => {
                 for number in 0..*args {
@@ -377,8 +598,8 @@ pub struct MFunction {
     pub vreg_count: u32,
     /// Where the function's name is written; errors about the whole function point here.
     pub span: Span,
-    /// The most stack arguments of any call in the function (arguments 9 and up).
-    pub out_args: u32,
+    /// The end of the largest outgoing stack-argument area of any call, in bytes (before rounding up to 16).
+    pub out_arg_bytes: u32,
     /// The number the next local label gets; isel stops at the first unused one and relaxation continues.
     pub next_label: u32,
     /// The instructions in order: `Prologue`, parameter stores, blocks, panic paths.

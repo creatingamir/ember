@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ir::{BinOp, Block, BlockId, Function, Inst, IrType, Loc, Param, Sign, Temp, Terminator};
+use ir::{
+    BinOp, Block, BlockId, Function, Inst, IrType, Loc, Param, PrintKind, Sign, Temp, Terminator,
+};
 use source::{SourceFile, Span};
 
 /// The file name every test program is compiled under; it shows up in panic messages.
@@ -317,4 +319,151 @@ pub fn i64_temp_types(blocks: &[Block]) -> Vec<IrType> {
     }
     let count = highest.map_or(0, |last| last.saturating_add(1).min(MAX_LISTED_TEMPS));
     vec![IrType::I64; count as usize]
+}
+
+/// Asserts that `text` contains `needle`, showing the text when it does not.
+pub fn assert_contains(text: &str, needle: &str) {
+    assert!(text.contains(needle), "`{needle}` not found in:\n{text}");
+}
+
+/// Asserts that `text` does not contain `needle`, showing the text when it does.
+pub fn assert_lacks(text: &str, needle: &str) {
+    assert!(!text.contains(needle), "`{needle}` found in:\n{text}");
+}
+
+/// The trimmed lines of `text`.
+pub fn trimmed_lines(text: &str) -> Vec<&str> {
+    text.lines().map(str::trim).collect()
+}
+
+/// Asserts that `run` appears in `text` as consecutive lines (ignoring indentation).
+pub fn assert_run(text: &str, run: &[&str]) {
+    let lines = trimmed_lines(text);
+    let found = lines.windows(run.len()).any(|window| window == run);
+    assert!(found, "lines {run:#?} not found consecutively in:\n{text}");
+}
+
+/// The lines of one function's body: everything after `symbol:` up to the next directive or symbol.
+pub fn function_text(text: &str, symbol: &str) -> String {
+    let header = format!("{symbol}:");
+    let body: Vec<&str> = text
+        .lines()
+        .skip_while(|line| *line != header)
+        .skip(1)
+        .take_while(|line| !line.starts_with('.') && !line.starts_with('_'))
+        .collect();
+    assert!(!body.is_empty(), "`{symbol}` not found in:\n{text}");
+    body.join("\n")
+}
+
+/// A parameter stored in `slot`, with the given type and signedness.
+pub fn param_of(slot: u32, ty: IrType, sign: Sign) -> Param {
+    Param {
+        slot: ir::SlotId(slot),
+        ty,
+        sign,
+    }
+}
+
+/// A slot named `name` that holds one value of `ty`: its size and alignment are the type's.
+pub fn slot_of(name: &str, ty: IrType) -> ir::Slot {
+    ir::Slot {
+        name: name.to_string(),
+        size: ty.bytes(),
+        align: ty.bytes(),
+    }
+}
+
+/// A function built from its parts, with a zero span.
+pub fn typed_function(
+    name: &str,
+    params: Vec<Param>,
+    ret: Option<IrType>,
+    slots: Vec<ir::Slot>,
+    temp_types: Vec<IrType>,
+    blocks: Vec<Block>,
+) -> Function {
+    Function {
+        name: name.to_string(),
+        params,
+        ret,
+        slots,
+        temp_types,
+        blocks,
+        span: Span::new(0, 0),
+    }
+}
+
+/// A `main` that does nothing, so a module of other functions links.
+pub fn empty_main() -> Function {
+    let entry = block_of(0, vec![], Terminator::Return(None));
+    typed_function("main", vec![], None, vec![], vec![], vec![entry])
+}
+
+/// A module of `functions` followed by an empty `main`.
+pub fn module_with_main(mut functions: Vec<Function>) -> ir::Module {
+    functions.push(empty_main());
+    ir::Module { functions }
+}
+
+/// A one-block function: `insts` then `term`, with the given parameters, return type, slots and temp types.
+pub fn single_block_function(
+    name: &str,
+    params: Vec<Param>,
+    ret: Option<IrType>,
+    slots: Vec<ir::Slot>,
+    temp_types: Vec<IrType>,
+    insts: Vec<Inst>,
+    term: Terminator,
+) -> Function {
+    let entry = block_of(0, insts, term);
+    typed_function(name, params, ret, slots, temp_types, vec![entry])
+}
+
+/// A load of `slot` into `dst` with the given extension.
+pub fn load_of(dst: u32, slot: u32, sign: Sign) -> Inst {
+    Inst::Load {
+        dst: Temp(dst),
+        slot: ir::SlotId(slot),
+        sign,
+    }
+}
+
+/// A store of `src` into `slot`.
+pub fn store_of(slot: u32, src: u32) -> Inst {
+    Inst::Store {
+        slot: ir::SlotId(slot),
+        src: Temp(src),
+    }
+}
+
+/// A print of `src` as `kind`.
+pub fn print_of(src: u32, kind: PrintKind) -> Inst {
+    Inst::Print {
+        src: Temp(src),
+        kind,
+    }
+}
+
+/// A binary instruction on temps with the source location `line`:`col`.
+pub fn binary_at(dst: u32, op: BinOp, lhs: u32, rhs: u32, line: u32, col: u32) -> Inst {
+    Inst::Binary {
+        dst: Temp(dst),
+        op,
+        lhs: Temp(lhs),
+        rhs: Temp(rhs),
+        loc: Loc { line, col },
+    }
+}
+
+/// The test-only C harness that calls Ember functions with C types and checks their results.
+pub const ABI_HARNESS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/abi_harness.c");
+
+/// Emits assembly for an IR module and runs it under the ABI harness (its own entry point, `_main` unused).
+pub fn run_module_in_abi_harness(module: &ir::Module) -> (String, String, i32) {
+    let asm = emit_ok(module, FILE);
+    run_asm_linked(
+        &asm,
+        &["prog.o", ABI_HARNESS, "-Wl,-e,_harness_main", "-o", "prog"],
+    )
 }
