@@ -64,6 +64,15 @@ pub enum Sign {
     Unsigned,
 }
 
+/// The type of a value as the language sees it: a width and a signedness (`bool` is unsigned, `I8`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValueType {
+    /// The width.
+    pub ty: IrType,
+    /// Signed for signed integers, unsigned for unsigned integers and `bool`.
+    pub sign: Sign,
+}
+
 /// One parameter: the slot it is stored in on entry, its type and its signedness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Param {
@@ -171,6 +180,21 @@ pub enum Inst {
         /// The start of the expression, reported if the operation panics.
         loc: Loc,
     },
+    /// `dst = src` converted from one integer type to another; panics when the value does not fit.
+    ///
+    /// The widths are those of `src` and `dst` in `Function::temp_types`.
+    Conv {
+        /// The temp that receives the converted value.
+        dst: Temp,
+        /// The temp that holds the value to convert.
+        src: Temp,
+        /// The signedness of the source type.
+        from: Sign,
+        /// The signedness of the target type.
+        to: Sign,
+        /// The start of the conversion, reported if it panics.
+        loc: Loc,
+    },
     /// `dst = 1 - src` for a boolean `src`.
     Not {
         /// The temp that receives the result.
@@ -196,7 +220,20 @@ pub enum Inst {
     },
 }
 
-/// The binary operations; `Add` to `Rem` are checked for overflow and division by zero.
+/// Tells whether some value of the type `from` does not fit the type `to`, so that `Inst::Conv` can panic.
+pub fn conversion_can_fail(from: ValueType, to: ValueType) -> bool {
+    match (from.sign, to.sign) {
+        (Sign::Signed, Sign::Unsigned) => true,
+        // An unsigned value only fits a signed type that has a spare bit.
+        (Sign::Unsigned, Sign::Signed) => to.ty.bits() <= from.ty.bits(),
+        (Sign::Signed, Sign::Signed) | (Sign::Unsigned, Sign::Unsigned) => {
+            to.ty.bits() < from.ty.bits()
+        }
+    }
+}
+
+/// The binary operations; `Add` to `Rem` are checked for overflow and division by zero, and shifts
+/// check their amount.
 ///
 /// Signedness is part of the operation, because the backend needs it (decision 0029).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +260,18 @@ pub enum BinOp {
     Gt(Sign),
     /// `>=`
     Ge(Sign),
+    /// `&`
+    And,
+    /// `|`
+    Or,
+    /// `^`
+    Xor,
+    /// `lhs << rhs`; `rhs` may have any integer type. Panics when `rhs` is negative or at least the width of `lhs`.
+    ///
+    /// The sign is that of `lhs`: it tells how an 8- or 16-bit result is extended again.
+    Shl(Sign),
+    /// `lhs >> rhs`: arithmetic for `Signed`, logical for `Unsigned`; panics like `Shl`.
+    Shr(Sign),
 }
 
 /// How `print` shows its value.

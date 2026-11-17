@@ -9,5 +9,5 @@ pub use lower::lower;
 pub use print::print_module;
 pub use types::{
     BinOp, Block, BlockId, Function, Inst, IrType, Loc, Module, Param, PrintKind, Sign, Slot,
-    SlotId, Temp, Terminator,
+    SlotId, Temp, Terminator, ValueType, conversion_can_fail,
 };

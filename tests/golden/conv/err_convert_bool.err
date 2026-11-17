@@ -1,0 +1,3 @@
+conv/err_convert_bool.em:2:14: error: cannot convert `bool` to `u8`
+        print(u8(true))
+                 ^

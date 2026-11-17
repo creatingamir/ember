@@ -300,7 +300,9 @@ pub fn i64_temp_types(blocks: &[Block]) -> Vec<IrType> {
                 Inst::Binary { dst, lhs, rhs, .. } => {
                     [dst, lhs, rhs].into_iter().for_each(&mut note)
                 }
-                Inst::Neg { dst, src, .. } | Inst::Not { dst, src } => {
+                Inst::Neg { dst, src, .. }
+                | Inst::Not { dst, src }
+                | Inst::Conv { dst, src, .. } => {
                     note(dst);
                     note(src);
                 }

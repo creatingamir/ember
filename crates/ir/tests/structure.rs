@@ -318,7 +318,8 @@ fn every_temp_is_assigned_once() {
                 | Inst::Load { dst, .. }
                 | Inst::Binary { dst, .. }
                 | Inst::Neg { dst, .. }
-                | Inst::Not { dst, .. } => Some(*dst),
+                | Inst::Not { dst, .. }
+                | Inst::Conv { dst, .. } => Some(*dst),
                 Inst::Call { dst, .. } => *dst,
                 Inst::Store { .. } | Inst::Print { .. } => None,
             };
@@ -549,6 +550,7 @@ fn temp_types_has_one_entry_per_temp() {
                 | Inst::Binary { .. }
                 | Inst::Neg { .. }
                 | Inst::Not { .. }
+                | Inst::Conv { .. }
                 | Inst::Call { dst: Some(_), .. } => defined += 1,
                 Inst::Call { dst: None, .. } | Inst::Store { .. } | Inst::Print { .. } => {}
             }

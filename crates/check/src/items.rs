@@ -6,7 +6,7 @@ use source::Span;
 use super::{Checker, FnSig, Ty, TypeId};
 
 /// The type names from the language spec that are not supported yet.
-const UNSUPPORTED_TYPES: [&str; 5] = ["f16", "bf16", "f32", "f64", "str"];
+pub(super) const UNSUPPORTED_TYPES: [&str; 5] = ["f16", "bf16", "f32", "f64", "str"];
 
 impl Checker {
     /// Checks every function of the program.
@@ -56,15 +56,10 @@ impl Checker {
     /// Turns a written type into a type, reporting names that are not usable types.
     pub(super) fn resolve_type(&mut self, type_expr: &TypeExpr) -> Ty {
         let name = type_expr.name.name.as_str();
+        if let Some(integer) = integer_type(name) {
+            return Ty::Known(integer);
+        }
         match name {
-            "i8" => Ty::Known(TypeId::I8),
-            "i16" => Ty::Known(TypeId::I16),
-            "i32" => Ty::Known(TypeId::I32),
-            "i64" => Ty::I64,
-            "u8" => Ty::Known(TypeId::U8),
-            "u16" => Ty::Known(TypeId::U16),
-            "u32" => Ty::Known(TypeId::U32),
-            "u64" => Ty::Known(TypeId::U64),
             "bool" => Ty::BOOL,
             _ if UNSUPPORTED_TYPES.contains(&name) => {
                 self.error(
@@ -135,6 +130,21 @@ impl Checker {
             );
             self.error(message, function.name.span);
         }
+    }
+}
+
+/// The integer type that a name spells, such as `u8`, or `None` for any other name.
+pub(super) fn integer_type(name: &str) -> Option<TypeId> {
+    match name {
+        "i8" => Some(TypeId::I8),
+        "i16" => Some(TypeId::I16),
+        "i32" => Some(TypeId::I32),
+        "i64" => Some(TypeId::I64),
+        "u8" => Some(TypeId::U8),
+        "u16" => Some(TypeId::U16),
+        "u32" => Some(TypeId::U32),
+        "u64" => Some(TypeId::U64),
+        _ => None,
     }
 }
 

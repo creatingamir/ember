@@ -96,10 +96,10 @@ fn not_of_i64_is_rejected_at_the_operand() {
     assert_single_error(&src, "expected `bool`, found `i64`", "1", 0);
 }
 
-/// `~`, `&` and `*` are not supported yet; the error covers the whole expression.
+/// `&` and `*` are not supported yet; the error covers the whole expression.
 #[test]
 fn unsupported_unary_operators_are_rejected() {
-    for op in ["~", "&", "*"] {
+    for op in ["&", "*"] {
         let expr = format!("{op}1");
         let message = format!("`{op}` is not supported yet");
         assert_single_error(&binding_expr(&expr), &message, &expr, 0);
@@ -191,14 +191,15 @@ fn range_as_call_argument_is_rejected() {
     assert_single_error(&src, "ranges can only be used in `for` loops", "0..3", 0);
 }
 
-/// Operators outside the subset say so, spelled as in the source.
+/// `@` is outside the subset and says so, spelled as in the source.
 #[test]
 fn unsupported_binary_operators_are_rejected() {
-    for op in ["@", "<<", ">>", "&", "|", "^"] {
-        let expr = format!("1 {op} 2");
-        let message = format!("`{op}` is not supported yet");
-        assert_single_error(&binding_expr(&expr), &message, &expr, 0);
-    }
+    assert_single_error(
+        &binding_expr("1 @ 2"),
+        "`@` is not supported yet",
+        "1 @ 2",
+        0,
+    );
 }
 
 /// Well-typed operators of every family are accepted.

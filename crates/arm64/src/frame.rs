@@ -139,6 +139,13 @@ pub mod size_table {
             | MInst::Sdiv { .. }
             | MInst::Udiv { .. }
             | MInst::Msub { .. }
+            | MInst::And { .. }
+            | MInst::Orr { .. }
+            | MInst::Eor { .. }
+            | MInst::Lsl { .. }
+            | MInst::Lsr { .. }
+            | MInst::Asr { .. }
+            | MInst::Extend { .. }
             | MInst::Cmp { .. }
             | MInst::CmpExt { .. }
             | MInst::Tst { .. }

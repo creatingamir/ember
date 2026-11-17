@@ -3,8 +3,10 @@
 use ir::{BinOp, IrType, Loc, Sign};
 use source::Diagnostic;
 
-use super::{PanicReason, Selector, size_of};
+use super::bits::Shift;
+use super::{Selector, size_of};
 use crate::mir::{Cond, Ext, MInst, Reg, Size, internal_error};
+use crate::strings::PanicReason;
 
 /// The operands, type and position of one binary operation.
 #[derive(Clone, Copy)]
@@ -24,12 +26,14 @@ struct Arith {
 }
 
 impl Selector<'_> {
-    /// Selects a binary operation on operands of type `ty`.
+    /// Selects a binary operation on operands of the types `[lhs, rhs]`.
+    ///
+    /// The types differ only for a shift, whose amount may have any type.
     pub(super) fn select_binary(
         &mut self,
         [dst, lhs, rhs]: [Reg; 3],
         op: BinOp,
-        ty: IrType,
+        [ty, amount_ty]: [IrType; 2],
         loc: Loc,
     ) -> Result<(), Diagnostic> {
         let with = |sign| Arith {
@@ -52,6 +56,31 @@ impl Selector<'_> {
             BinOp::Le(sign) => self.select_compare(with(sign), ordered(sign, Order::Le)),
             BinOp::Gt(sign) => self.select_compare(with(sign), ordered(sign, Order::Gt)),
             BinOp::Ge(sign) => self.select_compare(with(sign), ordered(sign, Order::Ge)),
+            // Two extended values give an extended result, so a bitwise operation needs no check.
+            BinOp::And => self.insts.push(MInst::And {
+                dst,
+                lhs,
+                rhs,
+                size: size_of(ty),
+            }),
+            BinOp::Or => self.insts.push(MInst::Orr {
+                dst,
+                lhs,
+                rhs,
+                size: size_of(ty),
+            }),
+            BinOp::Xor => self.insts.push(MInst::Eor {
+                dst,
+                lhs,
+                rhs,
+                size: size_of(ty),
+            }),
+            BinOp::Shl(sign) => {
+                self.select_shift([dst, lhs, rhs], Shift::Left(sign), [ty, amount_ty], loc)?;
+            }
+            BinOp::Shr(sign) => {
+                self.select_shift([dst, lhs, rhs], Shift::Right(sign), [ty, amount_ty], loc)?;
+            }
         }
         Ok(())
     }

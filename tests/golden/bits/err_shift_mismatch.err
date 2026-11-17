@@ -1,0 +1,3 @@
+bits/err_shift_mismatch.em:4:15: error: expected `u8`, found `u16`
+        print(a | b)
+                  ^

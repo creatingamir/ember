@@ -90,6 +90,50 @@ fn print_inst(asm: &mut Asm, inst: &MInst, frame_size: u64) -> Result<(), Diagno
             sized(*mul_rhs, *size)?,
             sized(*minuend, *size)?
         )),
+        MInst::And {
+            dst,
+            lhs,
+            rhs,
+            size,
+        } => print_three(asm, "and", [*dst, *lhs, *rhs], *size)?,
+        MInst::Orr {
+            dst,
+            lhs,
+            rhs,
+            size,
+        } => print_three(asm, "orr", [*dst, *lhs, *rhs], *size)?,
+        MInst::Eor {
+            dst,
+            lhs,
+            rhs,
+            size,
+        } => print_three(asm, "eor", [*dst, *lhs, *rhs], *size)?,
+        MInst::Lsl {
+            dst,
+            lhs,
+            rhs,
+            size,
+        } => print_three(asm, "lsl", [*dst, *lhs, *rhs], *size)?,
+        MInst::Lsr {
+            dst,
+            lhs,
+            rhs,
+            size,
+        } => print_three(asm, "lsr", [*dst, *lhs, *rhs], *size)?,
+        MInst::Asr {
+            dst,
+            lhs,
+            rhs,
+            size,
+        } => print_three(asm, "asr", [*dst, *lhs, *rhs], *size)?,
+        MInst::Extend { dst, src, ext } => {
+            if *ext == Ext::Sxtw {
+                return Err(internal_error(
+                    "an extension to 64 bits was selected on w registers",
+                ));
+            }
+            print_two(asm, extension(*ext), *dst, *src, Size::W)?;
+        }
         MInst::Cmp { lhs, rhs, size } => asm.inst(&format!(
             "cmp {}, {}",
             sized(*lhs, *size)?,
@@ -289,6 +333,8 @@ fn extension(ext: Ext) -> &'static str {
         Ext::Sxtb => "sxtb",
         Ext::Sxth => "sxth",
         Ext::Sxtw => "sxtw",
+        Ext::Uxtb => "uxtb",
+        Ext::Uxth => "uxth",
     }
 }
 
@@ -485,7 +531,7 @@ mod tests {
                     size,
                 },
             ]);
-            for ext in [Ext::Sxtb, Ext::Sxth, Ext::Sxtw] {
+            for ext in [Ext::Sxtb, Ext::Sxth, Ext::Sxtw, Ext::Uxtb, Ext::Uxth] {
                 insts.push(MInst::CmpExt {
                     lhs: reg,
                     rhs: reg,
@@ -493,6 +539,51 @@ mod tests {
                     size,
                 });
             }
+            insts.extend([
+                MInst::And {
+                    dst: reg,
+                    lhs: reg,
+                    rhs: reg,
+                    size,
+                },
+                MInst::Orr {
+                    dst: reg,
+                    lhs: reg,
+                    rhs: reg,
+                    size,
+                },
+                MInst::Eor {
+                    dst: reg,
+                    lhs: reg,
+                    rhs: reg,
+                    size,
+                },
+                MInst::Lsl {
+                    dst: reg,
+                    lhs: reg,
+                    rhs: reg,
+                    size,
+                },
+                MInst::Lsr {
+                    dst: reg,
+                    lhs: reg,
+                    rhs: reg,
+                    size,
+                },
+                MInst::Asr {
+                    dst: reg,
+                    lhs: reg,
+                    rhs: reg,
+                    size,
+                },
+            ]);
+        }
+        for ext in [Ext::Sxtb, Ext::Sxth, Ext::Uxtb, Ext::Uxth] {
+            insts.push(MInst::Extend {
+                dst: reg,
+                src: reg,
+                ext,
+            });
         }
         let values: [u64; 14] = [
             0,

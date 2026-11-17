@@ -26,6 +26,8 @@ pub enum Binding {
     Function(String),
     /// The built-in `print`.
     Print,
+    /// A conversion `T(x)` to the integer type `T`.
+    Convert(TypeId),
 }
 
 /// The parameter types and the return type of a function.

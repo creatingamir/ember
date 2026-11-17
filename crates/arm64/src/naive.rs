@@ -1,6 +1,6 @@
 //! The naive allocator: every virtual register lives in its own stack cell and is reloaded for each use.
 
-use crate::mir::{Access, MFunction, MInst, Mem, Reg, RegRole, VReg, internal_error};
+use crate::mir::{Access, Ext, MFunction, MInst, Mem, Reg, RegRole, VReg, internal_error};
 use source::Diagnostic;
 
 /// The scratch registers `x8` to `x11`, handed out in this order, so one instruction reads at most four values.
@@ -21,12 +21,47 @@ pub fn allocate(mut function: MFunction) -> Result<MFunction, Diagnostic> {
             insts.extend(pending_store.take());
             continue;
         }
+        if let Some(ext) = in_place_extension(&inst, pending_store.as_ref()) {
+            // The value is still in `x8`, so it is extended there and stored later.
+            insts.push(MInst::Extend {
+                dst: scratch(0),
+                src: scratch(0),
+                ext,
+            });
+            continue;
+        }
         insts.extend(pending_store.take());
         pending_store = rewrite(inst, &mut insts)?;
     }
     insts.extend(pending_store);
     function.insts = insts;
     Ok(function)
+}
+
+/// The extension `inst` applies, when it extends in place the register whose store is still waiting.
+fn in_place_extension(inst: &MInst, pending_store: Option<&MInst>) -> Option<Ext> {
+    let MInst::Extend {
+        dst: Reg::Virt(dst),
+        src: Reg::Virt(src),
+        ext,
+    } = inst
+    else {
+        return None;
+    };
+    // The store waits with its value in `x8`, so `x8` still holds the register that `inst` extends.
+    let Some(MInst::Store {
+        src: stored,
+        mem: Mem::Cell(cell),
+        ..
+    }) = pending_store
+    else {
+        return None;
+    };
+    if *stored == scratch(0) && dst == src && dst == cell {
+        Some(*ext)
+    } else {
+        None
+    }
 }
 
 /// Appends the allocated form of `inst` to `out`, except the store of its result, which is returned.

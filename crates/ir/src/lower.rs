@@ -16,7 +16,7 @@ use source::{Diagnostic, SourceFile, Span};
 use crate::blocks::remove_unreachable;
 use crate::{
     BinOp, Block, BlockId, Function, Inst, IrType, Loc, Module, Param, PrintKind, Sign, Slot,
-    SlotId, Temp, Terminator,
+    SlotId, Temp, Terminator, ValueType,
 };
 
 /// The internal error for a value whose type the checker did not record, or that has no value.
@@ -43,15 +43,6 @@ pub fn lower(
         functions.push(lowering.lower_function(function)?);
     }
     Ok(Module { functions })
-}
-
-/// The IR type of a value and how its bits are read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ValueType {
-    /// The width.
-    ty: IrType,
-    /// Signed for signed integers, unsigned for unsigned integers and `bool`.
-    sign: Sign,
 }
 
 impl ValueType {
@@ -774,7 +765,8 @@ impl<'a> FunctionLowering<'a> {
                 self.emit(Inst::Not { dst, src });
                 dst
             }
-            UnaryOp::BitNot | UnaryOp::AddrOf | UnaryOp::Deref => {
+            UnaryOp::BitNot => self.lower_bit_not(expr, operand),
+            UnaryOp::AddrOf | UnaryOp::Deref => {
                 self.internal_error(expr.span, &format!("the operator `{op}` is not supported"));
                 self.lower_expr(operand)
             }
@@ -797,6 +789,15 @@ impl<'a> FunctionLowering<'a> {
         let loc = self.loc(expr.span);
         self.emit(Inst::Neg { dst, src, loc });
         dst
+    }
+
+    /// Lowers `~e` as `e ^ all ones`, which keeps an unsigned value zero-extended.
+    fn lower_bit_not(&mut self, expr: &Expr, operand: &Expr) -> Temp {
+        let src = self.lower_expr(operand);
+        let value_type = self.expr_type(expr);
+        let ones = self.emit_const(all_ones(value_type), value_type.ty);
+        let loc = self.loc(expr.span);
+        self.emit_binary(BinOp::Xor, [src, ones], loc, value_type.ty)
     }
 
     /// Lowers an infix operator.
@@ -881,6 +882,10 @@ impl<'a> FunctionLowering<'a> {
                 self.lower_print(expr.span, args);
                 return None;
             }
+            Some(Binding::Convert(target)) => {
+                let target = *target;
+                return Some(self.lower_conversion(expr, target, args));
+            }
             Some(Binding::Function(_)) => {}
             _ => self.internal_error(expr.span, "a call is not bound to a function"),
         }
@@ -897,6 +902,32 @@ impl<'a> FunctionLowering<'a> {
             dst,
             func: callee.name.clone(),
             args: arg_temps,
+        });
+        dst
+    }
+
+    /// Lowers `T(e)`; converting to the type `e` already has is just `e`.
+    fn lower_conversion(&mut self, expr: &Expr, target: TypeId, args: &[Expr]) -> Temp {
+        let [arg] = args else {
+            self.internal_error(expr.span, "a conversion does not have exactly one argument");
+            return self.emit_const(0, IrType::I64);
+        };
+
+        let src = self.lower_expr(arg);
+        let from_id = self.checked.expr_types.get(&arg.id).copied();
+        if from_id == Some(target) {
+            return src;
+        }
+        let from = self.value_type(from_id);
+        let to = self.value_type(Some(target));
+        let dst = self.new_temp(to.ty);
+        let loc = self.loc(expr.span);
+        self.emit(Inst::Conv {
+            dst,
+            src,
+            from: from.sign,
+            to: to.sign,
+            loc,
         });
         dst
     }
@@ -934,6 +965,14 @@ impl<'a> FunctionLowering<'a> {
 /// The `i64` that holds the bits of a literal; a `u64` above `i64::MAX` becomes its two's complement.
 fn bit_pattern(magnitude: u64) -> i64 {
     magnitude.cast_signed()
+}
+
+/// The value with every bit of the type set, as an `i64`: -1, or 255, 65535 and 4294967295 for narrow unsigned types.
+fn all_ones(value_type: ValueType) -> i64 {
+    match value_type.sign {
+        Sign::Signed => -1,
+        Sign::Unsigned => bit_pattern(u64::MAX >> (64 - value_type.ty.bits())),
+    }
 }
 
 /// The magnitude of the smallest value of a signed type: 128 for `i8`, 2^63 for `i64`.
@@ -975,12 +1014,12 @@ fn bin_op(op: BinaryOp, sign: Sign) -> Option<BinOp> {
         BinaryOp::Le => Some(BinOp::Le(sign)),
         BinaryOp::Gt => Some(BinOp::Gt(sign)),
         BinaryOp::Ge => Some(BinOp::Ge(sign)),
+        BinaryOp::BitAnd => Some(BinOp::And),
+        BinaryOp::BitOr => Some(BinOp::Or),
+        BinaryOp::BitXor => Some(BinOp::Xor),
+        BinaryOp::Shl => Some(BinOp::Shl(sign)),
+        BinaryOp::Shr => Some(BinOp::Shr(sign)),
         BinaryOp::MatMul
-        | BinaryOp::Shl
-        | BinaryOp::Shr
-        | BinaryOp::BitAnd
-        | BinaryOp::BitOr
-        | BinaryOp::BitXor
         | BinaryOp::Range
         | BinaryOp::RangeInclusive
         | BinaryOp::And

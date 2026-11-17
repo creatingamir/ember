@@ -3,6 +3,7 @@
 use ast::{BinaryOp, Expr, ExprKind, Ident, UnaryOp};
 use source::Span;
 
+use super::items::{UNSUPPORTED_TYPES, integer_type};
 use super::{Binding, Checker, PRINT, Ty, TypeId};
 
 impl Checker {
@@ -51,7 +52,8 @@ impl Checker {
                 self.expect(Ty::BOOL, operand_ty, operand.span);
                 Ty::BOOL
             }
-            UnaryOp::BitNot | UnaryOp::AddrOf | UnaryOp::Deref => {
+            UnaryOp::BitNot => self.check_bit_not(operand),
+            UnaryOp::AddrOf | UnaryOp::Deref => {
                 self.check_expr(operand);
                 self.error(format!("`{op}` is not supported yet"), expr.span);
                 Ty::Error
@@ -77,12 +79,29 @@ impl Checker {
         operand_ty
     }
 
+    /// Checks `~e`: `e` must be an integer, and the result has its type.
+    fn check_bit_not(&mut self, operand: &Expr) -> Ty {
+        let operand_ty = self.check_expr(operand);
+        if operand_ty == Ty::UNTYPED || self.is_typed_integer(operand_ty) {
+            return operand_ty;
+        }
+        // Reports a `bool` or `()`; the error marker matches every type and reports nothing.
+        self.expect(Ty::I64, operand_ty, operand.span);
+        Ty::Error
+    }
+
     /// Checks an infix operator.
     fn check_binary(&mut self, expr: &Expr, op: BinaryOp, left: &Expr, right: &Expr) -> Ty {
         match op {
-            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
-                self.check_operands(left, right)
-            }
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor => self.check_operands(left, right),
+            BinaryOp::Shl | BinaryOp::Shr => self.check_shift(left, right),
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
                 self.check_operands_with_default(left, right);
                 Ty::BOOL
@@ -101,12 +120,7 @@ impl Checker {
                 self.error("ranges can only be used in `for` loops", expr.span);
                 Ty::Error
             }
-            BinaryOp::MatMul
-            | BinaryOp::Shl
-            | BinaryOp::Shr
-            | BinaryOp::BitAnd
-            | BinaryOp::BitOr
-            | BinaryOp::BitXor => {
+            BinaryOp::MatMul => {
                 self.check_expr(left);
                 self.check_expr(right);
                 self.error(format!("`{op}` is not supported yet"), expr.span);
@@ -135,6 +149,28 @@ impl Checker {
             return expected;
         }
         Ty::Error
+    }
+
+    /// Checks `a << b` and `a >> b`: `a` is an integer, `b` is an integer of any type.
+    ///
+    /// The amount settles on its own and defaults to `i64`, so the type of `a` comes from the
+    /// context. Returns the type of `a`, or `Ty::Error` when an operand is wrong.
+    fn check_shift(&mut self, left: &Expr, right: &Expr) -> Ty {
+        let left_ty = self.check_expr(left);
+        let amount_ty = self.check_expr(right);
+        let amount_ty = self.settle_to_default(right, amount_ty);
+
+        let left_ok = left_ty == Ty::UNTYPED || self.is_typed_integer(left_ty);
+        if !left_ok {
+            // Reports a `bool` or `()`; the error marker matches every type and reports nothing.
+            self.expect(Ty::I64, left_ty, left.span);
+            return Ty::Error;
+        }
+        if !self.is_typed_integer(amount_ty) {
+            self.expect(Ty::I64, amount_ty, right.span);
+            return Ty::Error;
+        }
+        left_ty
     }
 
     /// Like `check_operands`, but two untyped operands settle to `i64` right here.
@@ -211,7 +247,74 @@ impl Checker {
             return Ty::UNIT;
         }
 
+        if let Some(target) = integer_type(name) {
+            return self.check_conversion(expr, target, args, &arg_types);
+        }
+
+        if name == "bool" {
+            return self.check_bool_conversion(expr, args, &arg_types);
+        }
+
+        if UNSUPPORTED_TYPES.contains(&name) {
+            self.error(format!("type `{name}` is not supported yet"), callee.span);
+            return Ty::Error;
+        }
+
         self.error(format!("undefined function `{name}`"), callee.span);
+        Ty::Error
+    }
+
+    /// Checks `T(x)`, a conversion to the integer type `target`; `x` must be an integer.
+    ///
+    /// An untyped argument settles to `target`, so a literal that does not fit is an error here.
+    fn check_conversion(
+        &mut self,
+        expr: &Expr,
+        target: TypeId,
+        args: &[Expr],
+        arg_types: &[Ty],
+    ) -> Ty {
+        self.record_binding(expr.id, Binding::Convert(target));
+        let result = Ty::Known(target);
+        let name = self.type_name(target);
+        if !self.check_arity(&name, 1, args.len(), expr.span) {
+            return result;
+        }
+
+        for (arg, arg_ty) in args.iter().zip(arg_types) {
+            match arg_ty {
+                Ty::Known(TypeId::UNTYPED_INT) => {
+                    self.settle(arg, target);
+                }
+                Ty::Known(from) if !self.is_integer(*from) => {
+                    let from_name = self.type_name(*from);
+                    let message = format!("cannot convert `{from_name}` to `{name}`");
+                    self.error(message, arg.span);
+                }
+                Ty::Known(_) | Ty::Error => {}
+            }
+        }
+        result
+    }
+
+    /// Checks `bool(x)`, which is never allowed: no integer converts to `bool`.
+    fn check_bool_conversion(&mut self, expr: &Expr, args: &[Expr], arg_types: &[Ty]) -> Ty {
+        if !self.check_arity("bool", 1, args.len(), expr.span) {
+            return Ty::Error;
+        }
+        for arg_ty in arg_types {
+            // An argument with an earlier error is not reported again.
+            let Ty::Known(from) = arg_ty else {
+                continue;
+            };
+            let message = if *from == TypeId::BOOL {
+                "there is no conversion to `bool`".to_string()
+            } else {
+                let from_name = self.type_name(*from);
+                format!("cannot convert `{from_name}` to `bool`")
+            };
+            self.error(message, expr.span);
+        }
         Ty::Error
     }
 

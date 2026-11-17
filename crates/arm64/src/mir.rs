@@ -77,7 +77,9 @@ impl Access {
     }
 }
 
-/// How `CmpExt` extends its second operand.
+/// How `CmpExt` extends its second operand, and what `Extend` does to its source.
+///
+/// `Extend` works on `w` registers, so it only takes the four byte and half-word forms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ext {
     /// Sign-extend the low byte.
@@ -86,6 +88,10 @@ pub enum Ext {
     Sxth,
     /// Sign-extend the low word.
     Sxtw,
+    /// Zero-extend the low byte.
+    Uxtb,
+    /// Zero-extend the low half-word.
+    Uxth,
 }
 
 /// The register an address is relative to.
@@ -371,6 +377,81 @@ pub enum MInst {
         /// The right `w` operand.
         rhs: Reg,
     },
+    /// `and dst, lhs, rhs`
+    And {
+        /// The result.
+        dst: Reg,
+        /// The left operand.
+        lhs: Reg,
+        /// The right operand.
+        rhs: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
+    },
+    /// `orr dst, lhs, rhs`
+    Orr {
+        /// The result.
+        dst: Reg,
+        /// The left operand.
+        lhs: Reg,
+        /// The right operand.
+        rhs: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
+    },
+    /// `eor dst, lhs, rhs`
+    Eor {
+        /// The result.
+        dst: Reg,
+        /// The left operand.
+        lhs: Reg,
+        /// The right operand.
+        rhs: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
+    },
+    /// `lsl dst, lhs, rhs`: shifts left by the low 5 or 6 bits of `rhs`.
+    Lsl {
+        /// The result.
+        dst: Reg,
+        /// The value shifted.
+        lhs: Reg,
+        /// The shift amount; its register may be of another width than `size` says.
+        rhs: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
+    },
+    /// `lsr dst, lhs, rhs`: logical shift right.
+    Lsr {
+        /// The result.
+        dst: Reg,
+        /// The value shifted.
+        lhs: Reg,
+        /// The shift amount; its register may be of another width than `size` says.
+        rhs: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
+    },
+    /// `asr dst, lhs, rhs`: arithmetic shift right.
+    Asr {
+        /// The result.
+        dst: Reg,
+        /// The value shifted.
+        lhs: Reg,
+        /// The shift amount; its register may be of another width than `size` says.
+        rhs: Reg,
+        /// Whether the operation works on `w` or `x` registers.
+        size: Size,
+    },
+    /// `sxtb`, `sxth`, `uxtb` or `uxth` on `w` registers: extends the low byte or half-word of `src` into `dst`.
+    Extend {
+        /// The `w` result.
+        dst: Reg,
+        /// The `w` source.
+        src: Reg,
+        /// Which extension; never `Sxtw`.
+        ext: Ext,
+    },
     /// `cmp lhs, rhs, <ext>`: compares `lhs` with the extension of the low part of `rhs`.
     CmpExt {
         /// The left operand, named as `size` says.
@@ -521,6 +602,7 @@ impl MInst {
             | MInst::Neg { dst, src, .. }
             | MInst::Sxtw { dst, src }
             | MInst::Uxtw { dst, src }
+            | MInst::Extend { dst, src, .. }
             | MInst::EorOne { dst, src } => {
                 visit(dst, Def);
                 visit(src, Use);
@@ -537,7 +619,13 @@ impl MInst {
             | MInst::Smull { dst, lhs, rhs }
             | MInst::Umull { dst, lhs, rhs }
             | MInst::Sdiv { dst, lhs, rhs, .. }
-            | MInst::Udiv { dst, lhs, rhs, .. } => {
+            | MInst::Udiv { dst, lhs, rhs, .. }
+            | MInst::And { dst, lhs, rhs, .. }
+            | MInst::Orr { dst, lhs, rhs, .. }
+            | MInst::Eor { dst, lhs, rhs, .. }
+            | MInst::Lsl { dst, lhs, rhs, .. }
+            | MInst::Lsr { dst, lhs, rhs, .. }
+            | MInst::Asr { dst, lhs, rhs, .. } => {
                 visit(dst, Def);
                 visit(lhs, Use);
                 visit(rhs, Use);

@@ -1,22 +1,25 @@
 //! Instruction selection: turns an IR function into MIR over virtual registers.
 
 mod arith;
+mod bits;
 
-use ir::{BlockId, Function, Inst, IrType, Loc, PrintKind, Sign, SlotId, Temp, Terminator};
+use ir::{
+    BlockId, Function, Inst, IrType, Loc, PrintKind, Sign, SlotId, Temp, Terminator, ValueType,
+};
 use source::Diagnostic;
 
 use crate::mir::{Access, Cond, MFunction, MInst, Mem, Reg, Size, VReg, internal_error};
 use crate::runtime;
-use crate::strings;
+use crate::strings::{PanicReason, PanicReasons};
 
 /// How many arguments and parameters travel in registers (`x0` to `x7`); the rest go on the stack.
 const MAX_REGISTER_ARGS: usize = 8;
 
-/// Selects MIR for `function`, or reports the first impossible case found.
-pub fn select(function: &Function) -> Result<MFunction, Diagnostic> {
+/// Selects MIR for `function` and returns the panic reasons its panic paths use, or reports the first impossible case found.
+pub fn select(function: &Function) -> Result<(MFunction, PanicReasons), Diagnostic> {
     let mut selector = Selector::new(function);
     selector.select_function()?;
-    Ok(MFunction {
+    let selected = MFunction {
         name: function.name.clone(),
         slot_count: function.slots.len() as u32,
         vreg_count: selector.next_vreg,
@@ -25,26 +28,8 @@ pub fn select(function: &Function) -> Result<MFunction, Diagnostic> {
         next_label: selector.next_label,
         insts: selector.insts,
         frame_size: 0,
-    })
-}
-
-/// Why a check can fail; it picks the reason string of the panic.
-#[derive(Clone, Copy)]
-enum PanicReason {
-    /// A result outside the `i64` range.
-    Overflow,
-    /// A zero divisor.
-    DivByZero,
-}
-
-impl PanicReason {
-    /// The label of the reason's string constant.
-    fn label(self) -> &'static str {
-        match self {
-            PanicReason::Overflow => strings::OVERFLOW,
-            PanicReason::DivByZero => strings::DIV_BY_ZERO,
-        }
-    }
+    };
+    Ok((selected, selector.reasons))
 }
 
 /// A panic path written after the function body: its label, reason and source position.
@@ -71,6 +56,8 @@ struct Selector<'a> {
     next_label: u32,
     /// The panic paths still to be written after the body.
     panics: Vec<PanicPath>,
+    /// The reasons of every panic path selected so far.
+    reasons: PanicReasons,
 }
 
 impl<'a> Selector<'a> {
@@ -83,6 +70,7 @@ impl<'a> Selector<'a> {
             out_arg_bytes: 0,
             next_label: 0,
             panics: Vec::new(),
+            reasons: PanicReasons::default(),
         }
     }
 
@@ -211,10 +199,27 @@ impl<'a> Selector<'a> {
                 rhs,
                 loc,
             } => {
-                // Both operands have the same type.
-                let ty = self.temp_type(*lhs)?;
+                // The operands have the same type, except for the amount of a shift.
+                let types = [self.temp_type(*lhs)?, self.temp_type(*rhs)?];
                 let regs = [virt(*dst), virt(*lhs), virt(*rhs)];
-                self.select_binary(regs, *op, ty, *loc)?;
+                self.select_binary(regs, *op, types, *loc)?;
+            }
+            Inst::Conv {
+                dst,
+                src,
+                from,
+                to,
+                loc,
+            } => {
+                let from = ValueType {
+                    ty: self.temp_type(*src)?,
+                    sign: *from,
+                };
+                let to = ValueType {
+                    ty: self.temp_type(*dst)?,
+                    sign: *to,
+                };
+                self.select_conversion([virt(*dst), virt(*src)], from, to, *loc)?;
             }
             Inst::Neg { dst, src, loc } => {
                 let ty = self.temp_type(*src)?;
@@ -344,6 +349,7 @@ impl<'a> Selector<'a> {
             cond,
             target: label.clone(),
         });
+        self.reasons.insert(reason);
         self.panics.push(PanicPath { label, reason, loc });
     }
 
@@ -439,7 +445,9 @@ fn temps_of_inst(inst: &Inst) -> Vec<Temp> {
         Inst::Const { dst, .. } | Inst::Load { dst, .. } => vec![*dst],
         Inst::Store { src, .. } | Inst::Print { src, .. } => vec![*src],
         Inst::Binary { dst, lhs, rhs, .. } => vec![*dst, *lhs, *rhs],
-        Inst::Neg { dst, src, .. } | Inst::Not { dst, src } => vec![*dst, *src],
+        Inst::Neg { dst, src, .. } | Inst::Not { dst, src } | Inst::Conv { dst, src, .. } => {
+            vec![*dst, *src]
+        }
         Inst::Call { dst, args, .. } => {
             let mut temps = args.clone();
             if let Some(dst) = dst {

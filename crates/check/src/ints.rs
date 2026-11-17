@@ -12,7 +12,7 @@ impl Checker {
     }
 
     /// Tells whether a checker type is one of the eight integer types, which an untyped integer is not.
-    fn is_typed_integer(&self, ty: Ty) -> bool {
+    pub(super) fn is_typed_integer(&self, ty: Ty) -> bool {
         match ty {
             Ty::Known(id) => self.is_integer(id),
             Ty::Error => false,
@@ -53,8 +53,20 @@ impl Checker {
                 op: UnaryOp::Neg,
                 operand,
             } => self.settle_negation(expr, operand, ty),
+            ExprKind::Unary {
+                op: UnaryOp::BitNot,
+                operand,
+            } => self.settle(operand, ty),
             ExprKind::Binary {
-                op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem,
+                op:
+                    BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Rem
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor,
                 left,
                 right,
             } => {
@@ -62,6 +74,12 @@ impl Checker {
                 let right_ok = self.settle(right, ty);
                 left_ok && right_ok
             }
+            // The amount of a shift settled on its own when the shift was checked.
+            ExprKind::Binary {
+                op: BinaryOp::Shl | BinaryOp::Shr,
+                left,
+                ..
+            } => self.settle(left, ty),
             _ => {
                 self.internal_error(
                     "an expression that is not a constant has no type",

@@ -5,6 +5,7 @@ use std::fmt;
 
 use crate::{
     BinOp, BlockId, Function, Inst, IrType, Loc, Module, PrintKind, Sign, SlotId, Temp, Terminator,
+    ValueType, conversion_can_fail,
 };
 
 /// What a slot is called when the function has no slot with that number.
@@ -158,6 +159,13 @@ fn inst_text(inst: &Inst, function: &Function, labels: &[String]) -> String {
             text
         }
         Inst::Neg { dst, src, loc } => format!("{} = neg {src} {loc}", defined(function, *dst)),
+        Inst::Conv {
+            dst,
+            src,
+            from,
+            to,
+            loc,
+        } => conversion_text(function, [*dst, *src], [*from, *to], *loc),
         Inst::Not { dst, src } => format!("{} = not {src}", defined(function, *dst)),
         Inst::Call { dst, func, args } => {
             let call = format!("call {func}({})", temp_list(args));
@@ -208,6 +216,11 @@ fn mnemonic(op: BinOp) -> String {
         BinOp::Le(sign) => ("le", Some(sign)),
         BinOp::Gt(sign) => ("gt", Some(sign)),
         BinOp::Ge(sign) => ("ge", Some(sign)),
+        BinOp::And => ("and", None),
+        BinOp::Or => ("or", None),
+        BinOp::Xor => ("xor", None),
+        BinOp::Shl(_) => ("shl", None),
+        BinOp::Shr(sign) => ("shr", Some(sign)),
     };
     match sign {
         Some(Sign::Signed) => format!("{name}.s"),
@@ -220,8 +233,60 @@ fn mnemonic(op: BinOp) -> String {
 fn can_panic(op: BinOp) -> bool {
     matches!(
         op,
-        BinOp::Add(_) | BinOp::Sub(_) | BinOp::Mul(_) | BinOp::Div(_) | BinOp::Rem(_)
+        BinOp::Add(_)
+            | BinOp::Sub(_)
+            | BinOp::Mul(_)
+            | BinOp::Div(_)
+            | BinOp::Rem(_)
+            | BinOp::Shl(_)
+            | BinOp::Shr(_)
     )
+}
+
+/// Shows a conversion as `t1:i8 = conv.i64.u8 t0 @4:9`; the location is left out when it cannot fail.
+///
+/// `temps` is the result and the source; `signs` is the source sign and the target sign.
+fn conversion_text(function: &Function, temps: [Temp; 2], signs: [Sign; 2], loc: Loc) -> String {
+    let [dst, src] = temps;
+    let [from_sign, to_sign] = signs;
+    let from = temp_type_name(function, src, from_sign);
+    let to = temp_type_name(function, dst, to_sign);
+    let mut text = format!("{} = conv.{from}.{to} {src}", defined(function, dst));
+    let widths = (
+        function.temp_types.get(src.0 as usize),
+        function.temp_types.get(dst.0 as usize),
+    );
+    // A conversion between temps that have no type is already shown with `?`, so it prints a location.
+    let can_fail = match widths {
+        (Some(from_ty), Some(to_ty)) => {
+            let from = ValueType {
+                ty: *from_ty,
+                sign: from_sign,
+            };
+            let to = ValueType {
+                ty: *to_ty,
+                sign: to_sign,
+            };
+            conversion_can_fail(from, to)
+        }
+        _ => true,
+    };
+    if can_fail {
+        text.push_str(&format!(" {loc}"));
+    }
+    text
+}
+
+/// The source spelling of a temp's integer type, such as `u8`, or `?` when the function lists none.
+fn temp_type_name(function: &Function, temp: Temp, sign: Sign) -> String {
+    let letter = match sign {
+        Sign::Signed => 'i',
+        Sign::Unsigned => 'u',
+    };
+    match function.temp_types.get(temp.0 as usize) {
+        Some(ty) => format!("{letter}{}", ty.bits()),
+        None => UNKNOWN_TYPE.to_string(),
+    }
 }
 
 /// Returns the suffix of `print.` for a print kind.

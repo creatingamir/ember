@@ -23,17 +23,23 @@ pub fn emit(module: &ir::Module, file_name: &str) -> Result<String, Diagnostic> 
     let mut asm = Asm::new();
     asm.directive(".text");
     runtime::emit_main(&mut asm);
+    let mut used_reasons = strings::PanicReasons::default();
     for function in &module.functions {
-        emit_function(&mut asm, function)?;
+        emit_function(&mut asm, function, &mut used_reasons)?;
     }
     runtime::emit_helpers(&mut asm);
-    strings::emit_strings(&mut asm, file_name);
+    strings::emit_strings(&mut asm, file_name, used_reasons);
     Ok(asm.finish())
 }
 
-/// Writes one function by running it through the five steps.
-fn emit_function(asm: &mut Asm, function: &ir::Function) -> Result<(), Diagnostic> {
-    let selected = isel::select(function)?;
+/// Writes one function by running it through the five steps, and notes the panic reasons it uses.
+fn emit_function(
+    asm: &mut Asm,
+    function: &ir::Function,
+    used_reasons: &mut strings::PanicReasons,
+) -> Result<(), Diagnostic> {
+    let (selected, reasons) = isel::select(function)?;
+    used_reasons.extend(reasons);
     let allocated = naive::allocate(selected)?;
     let laid_out = frame::lay_out(allocated)?;
     let relaxed = relax::relax(laid_out)?;

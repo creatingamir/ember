@@ -1,0 +1,3 @@
+conv/err_convert_too_many_args.em:2:11: error: `u8` takes 1 argument, but 2 were given
+        print(u8(1, 2))
+              ^
