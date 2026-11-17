@@ -10,7 +10,7 @@ use common::{
     main_with, panic_stderr, program, run, run_module, run_module_in_guard_harness,
     unreachable_blocks,
 };
-use ir::{BinOp, Inst, Loc, Temp, Terminator};
+use ir::{BinOp, Inst, Loc, Sign, Temp, Terminator};
 
 /// Asserts that the program runs cleanly: exit code 0, nothing on stderr, exactly this stdout.
 fn assert_output(src: &str, expected_stdout: &str) {
@@ -1817,14 +1817,14 @@ fn op_on_constants(a: i64, op: BinOp, b: i64) -> Vec<Inst> {
 /// A far multiplication that fits runs through the relaxed check and prints the product.
 #[test]
 fn far_mul_without_overflow_prints_the_product() {
-    let module = far_op_module(op_on_constants(6, BinOp::Mul, 7));
+    let module = far_op_module(op_on_constants(6, BinOp::Mul(Sign::Signed), 7));
     assert_eq!(run_module(&module), ("42\n".to_string(), String::new(), 0));
 }
 
 /// A far multiplication that overflows panics through the relaxed check.
 #[test]
 fn far_mul_overflow_panics() {
-    let module = far_op_module(op_on_constants(i64::MAX, BinOp::Mul, 2));
+    let module = far_op_module(op_on_constants(i64::MAX, BinOp::Mul(Sign::Signed), 2));
     let (stdout, stderr, code) = run_module(&module);
     assert_eq!(stdout, "");
     assert_eq!(stderr, "panic: integer overflow at t.em:3:5\n");
@@ -1834,14 +1834,14 @@ fn far_mul_overflow_panics() {
 /// A far division that is fine prints the quotient.
 #[test]
 fn far_div_without_panic_prints_the_quotient() {
-    let module = far_op_module(op_on_constants(7, BinOp::Div, 2));
+    let module = far_op_module(op_on_constants(7, BinOp::Div(Sign::Signed), 2));
     assert_eq!(run_module(&module), ("3\n".to_string(), String::new(), 0));
 }
 
 /// A far division by zero panics through the relaxed zero check.
 #[test]
 fn far_div_by_zero_panics() {
-    let module = far_op_module(op_on_constants(7, BinOp::Div, 0));
+    let module = far_op_module(op_on_constants(7, BinOp::Div(Sign::Signed), 0));
     let (stdout, stderr, code) = run_module(&module);
     assert_eq!(stdout, "");
     assert_eq!(stderr, "panic: division by zero at t.em:3:5\n");
@@ -1851,7 +1851,7 @@ fn far_div_by_zero_panics() {
 /// A far `MIN / -1` panics through the relaxed overflow check.
 #[test]
 fn far_min_divided_by_minus_one_panics() {
-    let module = far_op_module(op_on_constants(i64::MIN, BinOp::Div, -1));
+    let module = far_op_module(op_on_constants(i64::MIN, BinOp::Div(Sign::Signed), -1));
     let (stdout, stderr, code) = run_module(&module);
     assert_eq!(stdout, "");
     assert_eq!(stderr, "panic: integer overflow at t.em:3:5\n");
@@ -2073,6 +2073,7 @@ fn store_and_print_module(slot_count: u32) -> ir::Module {
         Inst::Load {
             dst: Temp(1),
             slot: last,
+            sign: Sign::Signed,
         },
         Inst::Print {
             src: Temp(1),
@@ -2107,14 +2108,15 @@ fn far_stack_argument_module() -> ir::Module {
         .map(|(temp, slot)| Inst::Load {
             dst: Temp(temp as u32),
             slot: ir::SlotId(*slot),
+            sign: Sign::Signed,
         })
         .collect();
     let mut body = loads;
-    body.push(binary(4, BinOp::Sub, 2, 1));
-    body.push(binary(5, BinOp::Sub, 3, 0));
+    body.push(binary(4, BinOp::Sub(Sign::Signed), 2, 1));
+    body.push(binary(5, BinOp::Sub(Sign::Signed), 3, 0));
     body.push(constant(6, 10));
-    body.push(binary(7, BinOp::Mul, 5, 6));
-    body.push(binary(8, BinOp::Add, 7, 4));
+    body.push(binary(7, BinOp::Mul(Sign::Signed), 5, 6));
+    body.push(binary(8, BinOp::Add(Sign::Signed), 7, 4));
     let far = ir_function(
         "far",
         count,

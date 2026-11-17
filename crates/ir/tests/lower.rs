@@ -38,7 +38,7 @@ fn main_ir(source_lines: &[&str]) -> String {
     function_ir(&text(source_lines), "main")
 }
 
-/// Checks `x OP= 3` after `x := 10`; the add/sub/mul/div sits at the statement start.
+/// Checks `x OP= 3` after `x := 10`; the add/sub/mul/div sits at the statement start. `mnemonic` includes the sign suffix.
 fn assert_compound_assign(symbol: &str, mnemonic: &str) {
     let statement = format!("    x {symbol} 3");
     let actual = main_ir(&[
@@ -48,18 +48,18 @@ fn assert_compound_assign(symbol: &str, mnemonic: &str) {
         "    print(x)",
         "}",
     ]);
-    let last_op = format!("  t3 = {mnemonic} t1, t2 @3:5");
+    let last_op = format!("  t3:i64 = {mnemonic} t1, t2 @3:5");
     let expected = text(&[
         "fn main() {",
-        "  slots: x",
+        "  slots: x:8",
         "bb0:",
-        "  t0 = const 10",
+        "  t0:i64 = const 10",
         "  store x, t0",
-        "  t1 = load x",
-        "  t2 = const 3",
+        "  t1:i64 = load x",
+        "  t2:i64 = const 3",
         &last_op,
         "  store x, t3",
-        "  t4 = load x",
+        "  t4:i64 = load x",
         "  print.i64 t4",
         "  ret",
         "}",
@@ -67,18 +67,20 @@ fn assert_compound_assign(symbol: &str, mnemonic: &str) {
     assert_eq!(actual, expected, "operator {symbol}");
 }
 
-/// Checks `return a OP b` for one operator; `suffix` is the expected location text.
+/// Checks `return a OP b` for one operator; `mnemonic` includes the sign suffix and `suffix` is the expected location text.
 fn assert_operator(symbol: &str, return_type: &str, mnemonic: &str, suffix: &str) {
     let header = format!("fn f(a: i64, b: i64) -> {return_type} {{");
     let statement = format!("    return a {symbol} b");
     let source = text(&[&header, &statement, "}", "fn main() {", "}"]);
-    let operation = format!("  t2 = {mnemonic} t0, t1{suffix}");
+    let ir_type = if return_type == "bool" { "i8" } else { "i64" };
+    let operation = format!("  t2:{ir_type} = {mnemonic} t0, t1{suffix}");
+    let header = format!("fn f(a:i64, b:i64) -> {ir_type} {{");
     let expected = text(&[
-        "fn f(a, b) -> i64 {",
-        "  slots: a, b",
+        &header,
+        "  slots: a:8, b:8",
         "bb0:",
-        "  t0 = load a",
-        "  t1 = load b",
+        "  t0:i64 = load a",
+        "  t1:i64 = load b",
         &operation,
         "  ret t2",
         "}",
@@ -101,34 +103,34 @@ fn fib_program_prints_in_full() {
         "}",
     ]);
     let expected = text(&[
-        "fn fib(n) -> i64 {",
-        "  slots: n",
+        "fn fib(n:i64) -> i64 {",
+        "  slots: n:8",
         "bb0:",
-        "  t0 = load n",
-        "  t1 = const 2",
-        "  t2 = lt t0, t1",
+        "  t0:i64 = load n",
+        "  t1:i64 = const 2",
+        "  t2:i8 = lt.s t0, t1",
         "  br t2, bb1, bb2",
         "bb1:",
-        "  t3 = load n",
+        "  t3:i64 = load n",
         "  ret t3",
         "bb2:",
-        "  t4 = load n",
-        "  t5 = const 1",
-        "  t6 = sub t4, t5 @5:16",
-        "  t7 = call fib(t6)",
-        "  t8 = load n",
-        "  t9 = const 2",
-        "  t10 = sub t8, t9 @5:29",
-        "  t11 = call fib(t10)",
-        "  t12 = add t7, t11 @5:12",
+        "  t4:i64 = load n",
+        "  t5:i64 = const 1",
+        "  t6:i64 = sub.s t4, t5 @5:16",
+        "  t7:i64 = call fib(t6)",
+        "  t8:i64 = load n",
+        "  t9:i64 = const 2",
+        "  t10:i64 = sub.s t8, t9 @5:29",
+        "  t11:i64 = call fib(t10)",
+        "  t12:i64 = add.s t7, t11 @5:12",
         "  ret t12",
         "}",
         "",
         "fn main() {",
         "  slots:",
         "bb0:",
-        "  t0 = const 10",
-        "  t1 = call fib(t0)",
+        "  t0:i64 = const 10",
+        "  t1:i64 = call fib(t0)",
         "  print.i64 t1",
         "  ret",
         "}",
@@ -164,11 +166,11 @@ fn empty_slots_line_has_nothing_after_the_colon() {
 fn let_stores_and_name_read_loads() {
     let expected = text(&[
         "fn main() {",
-        "  slots: x",
+        "  slots: x:8",
         "bb0:",
-        "  t0 = const 5",
+        "  t0:i64 = const 5",
         "  store x, t0",
-        "  t1 = load x",
+        "  t1:i64 = load x",
         "  print.i64 t1",
         "  ret",
         "}",
@@ -184,11 +186,11 @@ fn let_stores_and_name_read_loads() {
 fn typed_let_lowers_like_untyped_let() {
     let expected = text(&[
         "fn main() {",
-        "  slots: x",
+        "  slots: x:8",
         "bb0:",
-        "  t0 = const 4",
+        "  t0:i64 = const 4",
         "  store x, t0",
-        "  t1 = load x",
+        "  t1:i64 = load x",
         "  print.i64 t1",
         "  ret",
         "}",
@@ -203,11 +205,11 @@ fn typed_let_lowers_like_untyped_let() {
 #[test]
 fn arithmetic_operators_carry_their_location() {
     let table = [
-        ("+", "add"),
-        ("-", "sub"),
-        ("*", "mul"),
-        ("/", "div"),
-        ("%", "rem"),
+        ("+", "add.s"),
+        ("-", "sub.s"),
+        ("*", "mul.s"),
+        ("/", "div.s"),
+        ("%", "rem.s"),
     ];
     for (symbol, mnemonic) in table {
         assert_operator(symbol, "i64", mnemonic, " @2:12");
@@ -220,10 +222,10 @@ fn comparison_operators_carry_no_location() {
     let table = [
         ("==", "eq"),
         ("!=", "ne"),
-        ("<", "lt"),
-        ("<=", "le"),
-        (">", "gt"),
-        (">=", "ge"),
+        ("<", "lt.s"),
+        ("<=", "le.s"),
+        (">", "gt.s"),
+        (">=", "ge.s"),
     ];
     for (symbol, mnemonic) in table {
         assert_operator(symbol, "bool", mnemonic, "");
@@ -237,9 +239,9 @@ fn printing_a_comparison_uses_print_bool() {
         "fn main() {",
         "  slots:",
         "bb0:",
-        "  t0 = const 1",
-        "  t1 = const 2",
-        "  t2 = lt t0, t1",
+        "  t0:i64 = const 1",
+        "  t1:i64 = const 2",
+        "  t2:i8 = lt.s t0, t1",
         "  print.bool t2",
         "  ret",
         "}",
@@ -258,14 +260,14 @@ fn binary_location_is_the_start_of_the_expression() {
         "}",
     ]);
     let expected = text(&[
-        "fn f(a, b, c) -> i64 {",
-        "  slots: a, b, c",
+        "fn f(a:i64, b:i64, c:i64) -> i64 {",
+        "  slots: a:8, b:8, c:8",
         "bb0:",
-        "  t0 = load a",
-        "  t1 = load b",
-        "  t2 = add t0, t1 @2:13",
-        "  t3 = load c",
-        "  t4 = mul t2, t3 @2:13",
+        "  t0:i64 = load a",
+        "  t1:i64 = load b",
+        "  t2:i64 = add.s t0, t1 @2:13",
+        "  t3:i64 = load c",
+        "  t4:i64 = mul.s t2, t3 @2:13",
         "  ret t4",
         "}",
     ]);
@@ -277,12 +279,12 @@ fn binary_location_is_the_start_of_the_expression() {
 fn neg_carries_the_expression_location() {
     let expected = text(&[
         "fn main() {",
-        "  slots: x",
+        "  slots: x:8",
         "bb0:",
-        "  t0 = const 3",
+        "  t0:i64 = const 3",
         "  store x, t0",
-        "  t1 = load x",
-        "  t2 = neg t1 @3:11",
+        "  t1:i64 = load x",
+        "  t2:i64 = neg t1 @3:11",
         "  print.i64 t2",
         "  ret",
         "}",
@@ -300,8 +302,8 @@ fn negated_ordinary_literal_is_const_then_neg() {
         "fn main() {",
         "  slots:",
         "bb0:",
-        "  t0 = const 5",
-        "  t1 = neg t0 @2:11",
+        "  t0:i64 = const 5",
+        "  t1:i64 = neg t0 @2:11",
         "  print.i64 t1",
         "  ret",
         "}",
@@ -316,7 +318,7 @@ fn min_literal_is_one_const() {
         "fn main() {",
         "  slots:",
         "bb0:",
-        "  t0 = const -9223372036854775808",
+        "  t0:i64 = const -9223372036854775808",
         "  print.i64 t0",
         "  ret",
         "}",
@@ -332,12 +334,12 @@ fn min_literal_is_one_const() {
 fn not_lowers_without_a_location() {
     let expected = text(&[
         "fn main() {",
-        "  slots: b",
+        "  slots: b:1",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i8 = const 1",
         "  store b, t0",
-        "  t1 = load b",
-        "  t2 = not t1",
+        "  t1:i8 = load.u b",
+        "  t2:i8 = not t1",
         "  print.bool t2",
         "  ret",
         "}",
@@ -355,9 +357,9 @@ fn bool_literals_are_one_and_zero() {
         "fn main() {",
         "  slots:",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i8 = const 1",
         "  print.bool t0",
-        "  t1 = const 0",
+        "  t1:i8 = const 0",
         "  print.bool t1",
         "  ret",
         "}",
@@ -373,13 +375,13 @@ fn bool_literals_are_one_and_zero() {
 fn assignment_stores_into_the_existing_slot() {
     let expected = text(&[
         "fn main() {",
-        "  slots: x",
+        "  slots: x:8",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i64 = const 1",
         "  store x, t0",
-        "  t1 = const 2",
+        "  t1:i64 = const 2",
         "  store x, t1",
-        "  t2 = load x",
+        "  t2:i64 = load x",
         "  print.i64 t2",
         "  ret",
         "}",
@@ -397,25 +399,25 @@ fn assignment_stores_into_the_existing_slot() {
 /// `+=` loads the target, adds, and stores, with the statement's location.
 #[test]
 fn add_assign_lowers_to_load_add_store() {
-    assert_compound_assign("+=", "add");
+    assert_compound_assign("+=", "add.s");
 }
 
 /// `-=` loads the target, subtracts, and stores, with the statement's location.
 #[test]
 fn sub_assign_lowers_to_load_sub_store() {
-    assert_compound_assign("-=", "sub");
+    assert_compound_assign("-=", "sub.s");
 }
 
 /// `*=` loads the target, multiplies, and stores, with the statement's location.
 #[test]
 fn mul_assign_lowers_to_load_mul_store() {
-    assert_compound_assign("*=", "mul");
+    assert_compound_assign("*=", "mul.s");
 }
 
 /// `/=` loads the target, divides, and stores, with the statement's location.
 #[test]
 fn div_assign_lowers_to_load_div_store() {
-    assert_compound_assign("/=", "div");
+    assert_compound_assign("/=", "div.s");
 }
 
 /// A compound assignment loads its target before it lowers the value.
@@ -423,19 +425,19 @@ fn div_assign_lowers_to_load_div_store() {
 fn compound_assign_loads_target_before_the_value() {
     let expected = text(&[
         "fn main() {",
-        "  slots: x, y",
+        "  slots: x:8, y:8",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i64 = const 1",
         "  store x, t0",
-        "  t1 = const 2",
+        "  t1:i64 = const 2",
         "  store y, t1",
-        "  t2 = load x",
-        "  t3 = load y",
-        "  t4 = const 3",
-        "  t5 = mul t3, t4 @4:10",
-        "  t6 = add t2, t5 @4:5",
+        "  t2:i64 = load x",
+        "  t3:i64 = load y",
+        "  t4:i64 = const 3",
+        "  t5:i64 = mul.s t3, t4 @4:10",
+        "  t6:i64 = add.s t2, t5 @4:5",
         "  store x, t6",
-        "  t7 = load x",
+        "  t7:i64 = load x",
         "  print.i64 t7",
         "  ret",
         "}",
@@ -463,14 +465,14 @@ fn compound_assign_on_a_parameter_uses_its_slot() {
         "}",
     ]);
     let expected = text(&[
-        "fn inc(n) -> i64 {",
-        "  slots: n",
+        "fn inc(n:i64) -> i64 {",
+        "  slots: n:8",
         "bb0:",
-        "  t0 = load n",
-        "  t1 = const 1",
-        "  t2 = add t0, t1 @2:5",
+        "  t0:i64 = load n",
+        "  t1:i64 = const 1",
+        "  t2:i64 = add.s t0, t1 @2:5",
         "  store n, t2",
-        "  t3 = load n",
+        "  t3:i64 = load n",
         "  ret t3",
         "}",
     ]);
@@ -482,23 +484,23 @@ fn compound_assign_on_a_parameter_uses_its_slot() {
 fn let_slot_comes_after_hidden_slots_of_its_value() {
     let expected = text(&[
         "fn main() {",
-        "  slots: a, b, $and, c",
+        "  slots: a:1, b:1, $and:1, c:1",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i8 = const 1",
         "  store a, t0",
-        "  t1 = const 0",
+        "  t1:i8 = const 0",
         "  store b, t1",
-        "  t2 = load a",
+        "  t2:i8 = load.u a",
         "  store $and, t2",
         "  br t2, bb1, bb2",
         "bb1:",
-        "  t3 = load b",
+        "  t3:i8 = load.u b",
         "  store $and, t3",
         "  jump bb2",
         "bb2:",
-        "  t4 = load $and",
+        "  t4:i8 = load.u $and",
         "  store c, t4",
-        "  t5 = load c",
+        "  t5:i8 = load.u c",
         "  print.bool t5",
         "  ret",
         "}",
@@ -519,29 +521,29 @@ fn let_slot_comes_after_hidden_slots_of_its_value() {
 fn duplicate_hidden_slot_names_get_their_slot_number() {
     let expected = text(&[
         "fn main() {",
-        "  slots: a, $and, $and#2",
+        "  slots: a:1, $and:1, $and#2:1",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i8 = const 1",
         "  store a, t0",
-        "  t1 = load a",
+        "  t1:i8 = load.u a",
         "  store $and, t1",
         "  br t1, bb1, bb2",
         "bb1:",
-        "  t2 = load a",
+        "  t2:i8 = load.u a",
         "  store $and, t2",
         "  jump bb2",
         "bb2:",
-        "  t3 = load $and",
+        "  t3:i8 = load.u $and",
         "  print.bool t3",
-        "  t4 = load a",
+        "  t4:i8 = load.u a",
         "  store $and#2, t4",
         "  br t4, bb3, bb4",
         "bb3:",
-        "  t5 = load a",
+        "  t5:i8 = load.u a",
         "  store $and#2, t5",
         "  jump bb4",
         "bb4:",
-        "  t6 = load $and#2",
+        "  t6:i8 = load.u $and#2",
         "  print.bool t6",
         "  ret",
         "}",
@@ -561,23 +563,23 @@ fn duplicate_hidden_slot_names_get_their_slot_number() {
 fn sibling_scope_locals_get_their_slot_number() {
     let expected = text(&[
         "fn main() {",
-        "  slots: x, x#1",
+        "  slots: x:8, x#1:8",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i8 = const 1",
         "  br t0, bb1, bb2",
         "bb1:",
-        "  t1 = const 1",
+        "  t1:i64 = const 1",
         "  store x, t1",
-        "  t2 = load x",
+        "  t2:i64 = load x",
         "  print.i64 t2",
         "  jump bb2",
         "bb2:",
-        "  t3 = const 1",
+        "  t3:i8 = const 1",
         "  br t3, bb3, bb4",
         "bb3:",
-        "  t4 = const 2",
+        "  t4:i64 = const 2",
         "  store x#1, t4",
-        "  t5 = load x#1",
+        "  t5:i64 = load x#1",
         "  print.i64 t5",
         "  jump bb4",
         "bb4:",
@@ -614,13 +616,13 @@ fn call_with_result_lowers_arguments_left_to_right() {
         "fn main() {",
         "  slots:",
         "bb0:",
-        "  t0 = const 1",
-        "  t1 = const 2",
-        "  t2 = add t0, t1 @5:15",
-        "  t3 = const 3",
-        "  t4 = const 4",
-        "  t5 = mul t3, t4 @5:22",
-        "  t6 = call two(t2, t5)",
+        "  t0:i64 = const 1",
+        "  t1:i64 = const 2",
+        "  t2:i64 = add.s t0, t1 @5:15",
+        "  t3:i64 = const 3",
+        "  t4:i64 = const 4",
+        "  t5:i64 = mul.s t3, t4 @5:22",
+        "  t6:i64 = call two(t2, t5)",
         "  print.i64 t6",
         "  ret",
         "}",
@@ -643,7 +645,7 @@ fn call_without_result_has_no_destination() {
         "fn main() {",
         "  slots:",
         "bb0:",
-        "  t0 = const 5",
+        "  t0:i64 = const 5",
         "  call say(t0)",
         "  ret",
         "}",
@@ -663,10 +665,10 @@ fn function_without_return_value_ends_with_ret() {
         "}",
     ]);
     let expected = text(&[
-        "fn say(x) {",
-        "  slots: x",
+        "fn say(x:i64) {",
+        "  slots: x:8",
         "bb0:",
-        "  t0 = load x",
+        "  t0:i64 = load x",
         "  print.i64 t0",
         "  ret",
         "}",
@@ -689,7 +691,7 @@ fn call_with_no_arguments_prints_empty_parentheses() {
         "fn main() {",
         "  slots:",
         "bb0:",
-        "  t0 = call zero()",
+        "  t0:i64 = call zero()",
         "  print.i64 t0",
         "  ret",
         "}",
@@ -712,16 +714,16 @@ fn discarded_call_result_keeps_its_destination() {
         "fn main() {",
         "  slots:",
         "bb0:",
-        "  t0 = const 1",
-        "  t1 = const 2",
-        "  t2 = call two(t0, t1)",
+        "  t0:i64 = const 1",
+        "  t1:i64 = const 2",
+        "  t2:i64 = call two(t0, t1)",
         "  ret",
         "}",
     ]);
     assert_eq!(function_ir(&source, "main"), expected);
 }
 
-/// A bool-returning function prints ` -> i64` and its call prints with `print.bool`.
+/// A bool-returning function prints ` -> i8` and its call prints with `print.bool`.
 #[test]
 fn bool_function_has_value_header_and_prints_as_bool() {
     let source = text(&[
@@ -733,10 +735,10 @@ fn bool_function_has_value_header_and_prints_as_bool() {
         "}",
     ]);
     let expected_yes = text(&[
-        "fn yes() -> i64 {",
+        "fn yes() -> i8 {",
         "  slots:",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i8 = const 1",
         "  ret t0",
         "}",
     ]);
@@ -744,7 +746,7 @@ fn bool_function_has_value_header_and_prints_as_bool() {
         "fn main() {",
         "  slots:",
         "bb0:",
-        "  t0 = call yes()",
+        "  t0:i8 = call yes()",
         "  print.bool t0",
         "  ret",
         "}",
@@ -758,21 +760,21 @@ fn bool_function_has_value_header_and_prints_as_bool() {
 fn and_uses_a_hidden_slot_and_two_blocks() {
     let expected = text(&[
         "fn main() {",
-        "  slots: a, b, $and",
+        "  slots: a:1, b:1, $and:1",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i8 = const 1",
         "  store a, t0",
-        "  t1 = const 0",
+        "  t1:i8 = const 0",
         "  store b, t1",
-        "  t2 = load a",
+        "  t2:i8 = load.u a",
         "  store $and, t2",
         "  br t2, bb1, bb2",
         "bb1:",
-        "  t3 = load b",
+        "  t3:i8 = load.u b",
         "  store $and, t3",
         "  jump bb2",
         "bb2:",
-        "  t4 = load $and",
+        "  t4:i8 = load.u $and",
         "  print.bool t4",
         "  ret",
         "}",
@@ -792,21 +794,21 @@ fn and_uses_a_hidden_slot_and_two_blocks() {
 fn or_uses_a_hidden_slot_and_two_blocks() {
     let expected = text(&[
         "fn main() {",
-        "  slots: a, b, $or",
+        "  slots: a:1, b:1, $or:1",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i8 = const 1",
         "  store a, t0",
-        "  t1 = const 0",
+        "  t1:i8 = const 0",
         "  store b, t1",
-        "  t2 = load a",
+        "  t2:i8 = load.u a",
         "  store $or, t2",
         "  br t2, bb2, bb1",
         "bb1:",
-        "  t3 = load b",
+        "  t3:i8 = load.u b",
         "  store $or, t3",
         "  jump bb2",
         "bb2:",
-        "  t4 = load $or",
+        "  t4:i8 = load.u $or",
         "  print.bool t4",
         "  ret",
         "}",
@@ -826,20 +828,20 @@ fn or_uses_a_hidden_slot_and_two_blocks() {
 fn if_without_else_branches_to_the_join_block() {
     let expected = text(&[
         "fn main() {",
-        "  slots: x",
+        "  slots: x:8",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i64 = const 1",
         "  store x, t0",
-        "  t1 = load x",
-        "  t2 = const 2",
-        "  t3 = lt t1, t2",
+        "  t1:i64 = load x",
+        "  t2:i64 = const 2",
+        "  t3:i8 = lt.s t1, t2",
         "  br t3, bb1, bb2",
         "bb1:",
-        "  t4 = const 1",
+        "  t4:i64 = const 1",
         "  print.i64 t4",
         "  jump bb2",
         "bb2:",
-        "  t5 = const 3",
+        "  t5:i64 = const 3",
         "  print.i64 t5",
         "  ret",
         "}",
@@ -861,24 +863,24 @@ fn if_without_else_branches_to_the_join_block() {
 fn if_else_has_then_else_and_join_blocks() {
     let expected = text(&[
         "fn main() {",
-        "  slots: x",
+        "  slots: x:8",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i64 = const 1",
         "  store x, t0",
-        "  t1 = load x",
-        "  t2 = const 2",
-        "  t3 = lt t1, t2",
+        "  t1:i64 = load x",
+        "  t2:i64 = const 2",
+        "  t3:i8 = lt.s t1, t2",
         "  br t3, bb1, bb2",
         "bb1:",
-        "  t4 = const 1",
+        "  t4:i64 = const 1",
         "  print.i64 t4",
         "  jump bb3",
         "bb2:",
-        "  t5 = const 2",
+        "  t5:i64 = const 2",
         "  print.i64 t5",
         "  jump bb3",
         "bb3:",
-        "  t6 = const 3",
+        "  t6:i64 = const 3",
         "  print.i64 t6",
         "  ret",
         "}",
@@ -902,31 +904,31 @@ fn if_else_has_then_else_and_join_blocks() {
 fn else_if_nests_an_if_in_the_else_block() {
     let expected = text(&[
         "fn main() {",
-        "  slots: x",
+        "  slots: x:8",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i64 = const 1",
         "  store x, t0",
-        "  t1 = load x",
-        "  t2 = const 1",
-        "  t3 = lt t1, t2",
+        "  t1:i64 = load x",
+        "  t2:i64 = const 1",
+        "  t3:i8 = lt.s t1, t2",
         "  br t3, bb1, bb2",
         "bb1:",
-        "  t4 = const 1",
+        "  t4:i64 = const 1",
         "  print.i64 t4",
         "  jump bb3",
         "bb2:",
-        "  t5 = load x",
-        "  t6 = const 2",
-        "  t7 = lt t5, t6",
+        "  t5:i64 = load x",
+        "  t6:i64 = const 2",
+        "  t7:i8 = lt.s t5, t6",
         "  br t7, bb4, bb5",
         "bb3:",
         "  ret",
         "bb4:",
-        "  t8 = const 2",
+        "  t8:i64 = const 2",
         "  print.i64 t8",
         "  jump bb6",
         "bb5:",
-        "  t9 = const 3",
+        "  t9:i64 = const 3",
         "  print.i64 t9",
         "  jump bb6",
         "bb6:",
@@ -959,7 +961,7 @@ fn infinite_loop_with_break_jumps_to_the_exit_block() {
         "bb1:",
         "  jump bb2",
         "bb2:",
-        "  t0 = const 1",
+        "  t0:i64 = const 1",
         "  print.i64 t0",
         "  ret",
         "}",
@@ -980,35 +982,35 @@ fn infinite_loop_with_break_jumps_to_the_exit_block() {
 fn infinite_loop_with_break_and_continue_inside_ifs() {
     let expected = text(&[
         "fn main() {",
-        "  slots: x",
+        "  slots: x:8",
         "bb0:",
-        "  t0 = const 0",
+        "  t0:i64 = const 0",
         "  store x, t0",
         "  jump bb1",
         "bb1:",
-        "  t1 = load x",
-        "  t2 = const 1",
-        "  t3 = add t1, t2 @4:9",
+        "  t1:i64 = load x",
+        "  t2:i64 = const 1",
+        "  t3:i64 = add.s t1, t2 @4:9",
         "  store x, t3",
-        "  t4 = load x",
-        "  t5 = const 3",
-        "  t6 = gt t4, t5",
+        "  t4:i64 = load x",
+        "  t5:i64 = const 3",
+        "  t6:i8 = gt.s t4, t5",
         "  br t6, bb3, bb4",
         "bb2:",
-        "  t11 = const 9",
+        "  t11:i64 = const 9",
         "  print.i64 t11",
         "  ret",
         "bb3:",
         "  jump bb2",
         "bb4:",
-        "  t7 = load x",
-        "  t8 = const 2",
-        "  t9 = eq t7, t8",
+        "  t7:i64 = load x",
+        "  t8:i64 = const 2",
+        "  t9:i8 = eq t7, t8",
         "  br t9, bb5, bb6",
         "bb5:",
         "  jump bb1",
         "bb6:",
-        "  t10 = load x",
+        "  t10:i64 = load x",
         "  print.i64 t10",
         "  jump bb1",
         "}",
@@ -1062,24 +1064,24 @@ fn statements_after_break_are_removed() {
 fn while_loop_tests_the_condition_in_a_header_block() {
     let expected = text(&[
         "fn main() {",
-        "  slots: i",
+        "  slots: i:8",
         "bb0:",
-        "  t0 = const 0",
+        "  t0:i64 = const 0",
         "  store i, t0",
         "  jump bb1",
         "bb1:",
-        "  t1 = load i",
-        "  t2 = const 3",
-        "  t3 = lt t1, t2",
+        "  t1:i64 = load i",
+        "  t2:i64 = const 3",
+        "  t3:i8 = lt.s t1, t2",
         "  br t3, bb2, bb3",
         "bb2:",
-        "  t4 = load i",
-        "  t5 = const 1",
-        "  t6 = add t4, t5 @4:9",
+        "  t4:i64 = load i",
+        "  t5:i64 = const 1",
+        "  t6:i64 = add.s t4, t5 @4:9",
         "  store i, t6",
         "  jump bb1",
         "bb3:",
-        "  t7 = load i",
+        "  t7:i64 = load i",
         "  print.i64 t7",
         "  ret",
         "}",
@@ -1101,38 +1103,38 @@ fn while_loop_tests_the_condition_in_a_header_block() {
 fn while_loop_break_and_continue_targets() {
     let expected = text(&[
         "fn main() {",
-        "  slots: i",
+        "  slots: i:8",
         "bb0:",
-        "  t0 = const 0",
+        "  t0:i64 = const 0",
         "  store i, t0",
         "  jump bb1",
         "bb1:",
-        "  t1 = load i",
-        "  t2 = const 5",
-        "  t3 = lt t1, t2",
+        "  t1:i64 = load i",
+        "  t2:i64 = const 5",
+        "  t3:i8 = lt.s t1, t2",
         "  br t3, bb2, bb3",
         "bb2:",
-        "  t4 = load i",
-        "  t5 = const 1",
-        "  t6 = add t4, t5 @4:9",
+        "  t4:i64 = load i",
+        "  t5:i64 = const 1",
+        "  t6:i64 = add.s t4, t5 @4:9",
         "  store i, t6",
-        "  t7 = load i",
-        "  t8 = const 2",
-        "  t9 = eq t7, t8",
+        "  t7:i64 = load i",
+        "  t8:i64 = const 2",
+        "  t9:i8 = eq t7, t8",
         "  br t9, bb4, bb5",
         "bb3:",
         "  ret",
         "bb4:",
         "  jump bb1",
         "bb5:",
-        "  t10 = load i",
-        "  t11 = const 4",
-        "  t12 = eq t10, t11",
+        "  t10:i64 = load i",
+        "  t11:i64 = const 4",
+        "  t12:i8 = eq t10, t11",
         "  br t12, bb6, bb7",
         "bb6:",
         "  jump bb3",
         "bb7:",
-        "  t13 = load i",
+        "  t13:i64 = load i",
         "  print.i64 t13",
         "  jump bb1",
         "}",
@@ -1160,26 +1162,26 @@ fn while_loop_break_and_continue_targets() {
 fn exclusive_range_loop_uses_lt_and_a_step_block() {
     let expected = text(&[
         "fn main() {",
-        "  slots: i, $end",
+        "  slots: i:8, $end:8",
         "bb0:",
-        "  t0 = const 0",
+        "  t0:i64 = const 0",
         "  store i, t0",
-        "  t1 = const 3",
+        "  t1:i64 = const 3",
         "  store $end, t1",
         "  jump bb1",
         "bb1:",
-        "  t2 = load i",
-        "  t3 = load $end",
-        "  t4 = lt t2, t3",
+        "  t2:i64 = load i",
+        "  t3:i64 = load $end",
+        "  t4:i8 = lt.s t2, t3",
         "  br t4, bb2, bb4",
         "bb2:",
-        "  t5 = load i",
+        "  t5:i64 = load i",
         "  print.i64 t5",
         "  jump bb3",
         "bb3:",
-        "  t6 = load i",
-        "  t7 = const 1",
-        "  t8 = add t6, t7 @2:5",
+        "  t6:i64 = load i",
+        "  t7:i64 = const 1",
+        "  t8:i64 = add.s t6, t7 @2:5",
         "  store i, t8",
         "  jump bb1",
         "bb4:",
@@ -1201,27 +1203,27 @@ fn exclusive_range_loop_uses_lt_and_a_step_block() {
 fn exclusive_range_loop_break_and_continue_targets() {
     let expected = text(&[
         "fn main() {",
-        "  slots: i, $end",
+        "  slots: i:8, $end:8",
         "bb0:",
-        "  t0 = const 0",
+        "  t0:i64 = const 0",
         "  store i, t0",
-        "  t1 = const 5",
+        "  t1:i64 = const 5",
         "  store $end, t1",
         "  jump bb1",
         "bb1:",
-        "  t2 = load i",
-        "  t3 = load $end",
-        "  t4 = lt t2, t3",
+        "  t2:i64 = load i",
+        "  t3:i64 = load $end",
+        "  t4:i8 = lt.s t2, t3",
         "  br t4, bb2, bb4",
         "bb2:",
-        "  t5 = load i",
-        "  t6 = const 3",
-        "  t7 = eq t5, t6",
+        "  t5:i64 = load i",
+        "  t6:i64 = const 3",
+        "  t7:i8 = eq t5, t6",
         "  br t7, bb5, bb6",
         "bb3:",
-        "  t12 = load i",
-        "  t13 = const 1",
-        "  t14 = add t12, t13 @2:5",
+        "  t12:i64 = load i",
+        "  t13:i64 = const 1",
+        "  t14:i64 = add.s t12, t13 @2:5",
         "  store i, t14",
         "  jump bb1",
         "bb4:",
@@ -1229,14 +1231,14 @@ fn exclusive_range_loop_break_and_continue_targets() {
         "bb5:",
         "  jump bb4",
         "bb6:",
-        "  t8 = load i",
-        "  t9 = const 1",
-        "  t10 = eq t8, t9",
+        "  t8:i64 = load i",
+        "  t9:i64 = const 1",
+        "  t10:i8 = eq t8, t9",
         "  br t10, bb7, bb8",
         "bb7:",
         "  jump bb3",
         "bb8:",
-        "  t11 = load i",
+        "  t11:i64 = load i",
         "  print.i64 t11",
         "  jump bb3",
         "}",
@@ -1262,33 +1264,33 @@ fn exclusive_range_loop_break_and_continue_targets() {
 fn inclusive_range_loop_checks_eq_before_incrementing() {
     let expected = text(&[
         "fn main() {",
-        "  slots: i, $end",
+        "  slots: i:8, $end:8",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i64 = const 1",
         "  store i, t0",
-        "  t1 = const 3",
+        "  t1:i64 = const 3",
         "  store $end, t1",
         "  jump bb1",
         "bb1:",
-        "  t2 = load i",
-        "  t3 = load $end",
-        "  t4 = le t2, t3",
+        "  t2:i64 = load i",
+        "  t3:i64 = load $end",
+        "  t4:i8 = le.s t2, t3",
         "  br t4, bb2, bb4",
         "bb2:",
-        "  t5 = load i",
+        "  t5:i64 = load i",
         "  print.i64 t5",
         "  jump bb3",
         "bb3:",
-        "  t6 = load i",
-        "  t7 = load $end",
-        "  t8 = eq t6, t7",
+        "  t6:i64 = load i",
+        "  t7:i64 = load $end",
+        "  t8:i8 = eq t6, t7",
         "  br t8, bb4, bb5",
         "bb4:",
         "  ret",
         "bb5:",
-        "  t9 = load i",
-        "  t10 = const 1",
-        "  t11 = add t9, t10 @2:5",
+        "  t9:i64 = load i",
+        "  t10:i64 = const 1",
+        "  t11:i64 = add.s t9, t10 @2:5",
         "  store i, t11",
         "  jump bb1",
         "}",
@@ -1308,31 +1310,31 @@ fn inclusive_range_loop_checks_eq_before_incrementing() {
 fn inclusive_range_loop_continue_goes_to_the_step_block() {
     let expected = text(&[
         "fn main() {",
-        "  slots: i, $end",
+        "  slots: i:8, $end:8",
         "bb0:",
-        "  t0 = const 0",
+        "  t0:i64 = const 0",
         "  store i, t0",
-        "  t1 = const 2",
+        "  t1:i64 = const 2",
         "  store $end, t1",
         "  jump bb1",
         "bb1:",
-        "  t2 = load i",
-        "  t3 = load $end",
-        "  t4 = le t2, t3",
+        "  t2:i64 = load i",
+        "  t3:i64 = load $end",
+        "  t4:i8 = le.s t2, t3",
         "  br t4, bb2, bb4",
         "bb2:",
         "  jump bb3",
         "bb3:",
-        "  t5 = load i",
-        "  t6 = load $end",
-        "  t7 = eq t5, t6",
+        "  t5:i64 = load i",
+        "  t6:i64 = load $end",
+        "  t7:i8 = eq t5, t6",
         "  br t7, bb4, bb5",
         "bb4:",
         "  ret",
         "bb5:",
-        "  t8 = load i",
-        "  t9 = const 1",
-        "  t10 = add t8, t9 @2:5",
+        "  t8:i64 = load i",
+        "  t9:i64 = const 1",
+        "  t10:i64 = add.s t8, t9 @2:5",
         "  store i, t10",
         "  jump bb1",
         "}",
@@ -1352,45 +1354,45 @@ fn inclusive_range_loop_continue_goes_to_the_step_block() {
 fn nested_range_loops_number_their_end_slots() {
     let expected = text(&[
         "fn main() {",
-        "  slots: i, $end, j, $end#3",
+        "  slots: i:8, $end:8, j:8, $end#3:8",
         "bb0:",
-        "  t0 = const 0",
+        "  t0:i64 = const 0",
         "  store i, t0",
-        "  t1 = const 2",
+        "  t1:i64 = const 2",
         "  store $end, t1",
         "  jump bb1",
         "bb1:",
-        "  t2 = load i",
-        "  t3 = load $end",
-        "  t4 = lt t2, t3",
+        "  t2:i64 = load i",
+        "  t3:i64 = load $end",
+        "  t4:i8 = lt.s t2, t3",
         "  br t4, bb2, bb4",
         "bb2:",
-        "  t5 = const 0",
+        "  t5:i64 = const 0",
         "  store j, t5",
-        "  t6 = const 2",
+        "  t6:i64 = const 2",
         "  store $end#3, t6",
         "  jump bb5",
         "bb3:",
-        "  t14 = load i",
-        "  t15 = const 1",
-        "  t16 = add t14, t15 @2:5",
+        "  t14:i64 = load i",
+        "  t15:i64 = const 1",
+        "  t16:i64 = add.s t14, t15 @2:5",
         "  store i, t16",
         "  jump bb1",
         "bb4:",
         "  ret",
         "bb5:",
-        "  t7 = load j",
-        "  t8 = load $end#3",
-        "  t9 = lt t7, t8",
+        "  t7:i64 = load j",
+        "  t8:i64 = load $end#3",
+        "  t9:i8 = lt.s t7, t8",
         "  br t9, bb6, bb8",
         "bb6:",
-        "  t10 = load j",
+        "  t10:i64 = load j",
         "  print.i64 t10",
         "  jump bb7",
         "bb7:",
-        "  t11 = load j",
-        "  t12 = const 1",
-        "  t13 = add t11, t12 @3:9",
+        "  t11:i64 = load j",
+        "  t12:i64 = const 1",
+        "  t13:i64 = add.s t11, t12 @3:9",
         "  store j, t13",
         "  jump bb5",
         "bb8:",
@@ -1431,16 +1433,16 @@ fn code_after_return_is_removed() {
         "}",
     ]);
     let expected = text(&[
-        "fn g(c) -> i64 {",
-        "  slots: c",
+        "fn g(c:i8.u) -> i64 {",
+        "  slots: c:1",
         "bb0:",
-        "  t0 = load c",
+        "  t0:i8 = load.u c",
         "  br t0, bb1, bb2",
         "bb1:",
-        "  t1 = const 1",
+        "  t1:i64 = const 1",
         "  ret t1",
         "bb2:",
-        "  t3 = const 3",
+        "  t3:i64 = const 3",
         "  ret t3",
         "}",
     ]);
@@ -1452,21 +1454,21 @@ fn code_after_return_is_removed() {
 fn removed_blocks_renumber_the_remaining_blocks() {
     let expected = text(&[
         "fn main() {",
-        "  slots: c",
+        "  slots: c:1",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i8 = const 1",
         "  store c, t0",
-        "  t1 = load c",
+        "  t1:i8 = load.u c",
         "  br t1, bb1, bb2",
         "bb1:",
         "  jump bb3",
         "bb2:",
-        "  t2 = load c",
+        "  t2:i8 = load.u c",
         "  br t2, bb4, bb5",
         "bb3:",
         "  jump bb3",
         "bb4:",
-        "  t3 = const 1",
+        "  t3:i64 = const 1",
         "  print.i64 t3",
         "  jump bb5",
         "bb5:",
@@ -1506,7 +1508,7 @@ fn infinite_loop_with_return_leaves_no_unreachable_block() {
         "bb0:",
         "  jump bb1",
         "bb1:",
-        "  t0 = const 1",
+        "  t0:i64 = const 1",
         "  ret t0",
         "}",
     ]);
@@ -1530,19 +1532,213 @@ fn if_else_returning_on_both_sides_leaves_no_unreachable_block() {
         "}",
     ]);
     let expected = text(&[
-        "fn g(c) -> i64 {",
-        "  slots: c",
+        "fn g(c:i8.u) -> i64 {",
+        "  slots: c:1",
         "bb0:",
-        "  t0 = load c",
+        "  t0:i8 = load.u c",
         "  br t0, bb1, bb2",
         "bb1:",
-        "  t1 = const 1",
+        "  t1:i64 = const 1",
         "  ret t1",
         "bb2:",
-        "  t2 = const 2",
+        "  t2:i64 = const 2",
         "  ret t2",
         "}",
     ]);
     assert_eq!(function_ir(&source, "g"), expected);
     assert!(!ir_text(&source).contains("unreachable"));
+}
+
+/// The spec's example: a `bool` parameter is `i8.u`, its slot is 1 byte, its load is `load.u`, and the result is `i8`.
+#[test]
+fn bool_parameter_and_result_print_as_i8() {
+    let source = text(&[
+        "fn f(a: i64, flag: bool) -> bool {",
+        "    return flag",
+        "}",
+        "fn main() {",
+        "}",
+    ]);
+    let expected = text(&[
+        "fn f(a:i64, flag:i8.u) -> i8 {",
+        "  slots: a:8, flag:1",
+        "bb0:",
+        "  t0:i8 = load.u flag",
+        "  ret t0",
+        "}",
+    ]);
+    assert_eq!(function_ir(&source, "f"), expected);
+}
+
+/// A call with a `bool` argument passes an `i8` temp, and the callee's `bool` result is an `i8` temp.
+#[test]
+fn bool_call_argument_and_result_are_i8() {
+    let source = text(&[
+        "fn id(b: bool) -> bool {",
+        "    return b",
+        "}",
+        "fn main() {",
+        "    print(id(true))",
+        "}",
+    ]);
+    let expected = text(&[
+        "fn main() {",
+        "  slots:",
+        "bb0:",
+        "  t0:i8 = const 1",
+        "  t1:i8 = call id(t0)",
+        "  print.bool t1",
+        "  ret",
+        "}",
+    ]);
+    assert_eq!(function_ir(&source, "main"), expected);
+}
+
+/// `a && b` keeps its value in a 1-byte `$and` slot, and the loads of `$and` are unsigned.
+#[test]
+fn and_slot_is_one_byte_and_loaded_unsigned() {
+    let output = main_ir(&[
+        "fn main() {",
+        "    a := true",
+        "    b := false",
+        "    print(a && b)",
+        "}",
+    ]);
+    assert!(output.contains("  slots: a:1, b:1, $and:1\n"), "{output}");
+    assert!(output.contains("  t4:i8 = load.u $and\n"), "{output}");
+}
+
+/// `a || b` keeps its value in a 1-byte `$or` slot, and the loads of `$or` are unsigned.
+#[test]
+fn or_slot_is_one_byte_and_loaded_unsigned() {
+    let output = main_ir(&[
+        "fn main() {",
+        "    a := true",
+        "    b := false",
+        "    print(a || b)",
+        "}",
+    ]);
+    assert!(output.contains("  slots: a:1, b:1, $or:1\n"), "{output}");
+    assert!(output.contains("  t4:i8 = load.u $or\n"), "{output}");
+}
+
+/// A range loop's `$end` slot is 8 bytes.
+#[test]
+fn range_loop_end_slot_is_eight_bytes() {
+    let output = main_ir(&["fn main() {", "    for i in 0..3 {", "    }", "}"]);
+    assert!(output.contains("  slots: i:8, $end:8\n"), "{output}");
+}
+
+/// A range loop's step is `add.s` of an `i64` and a `t…:i64 = const 1`.
+#[test]
+fn range_loop_step_is_a_signed_add_of_a_typed_one() {
+    let output = main_ir(&["fn main() {", "    for i in 0..3 {", "    }", "}"]);
+    let lines: Vec<&str> = output.lines().collect();
+    let add = lines
+        .iter()
+        .position(|line| line.contains("= add.s "))
+        .unwrap();
+    assert!(lines[add].contains(":i64 = add.s "), "{}", lines[add]);
+    assert!(
+        lines[add - 1].ends_with(":i64 = const 1"),
+        "{}",
+        lines[add - 1]
+    );
+}
+
+/// Every ordering comparison prints `.s`; `eq` and `ne` print no suffix.
+#[test]
+fn comparisons_print_their_sign_but_equality_does_not() {
+    let output = main_ir(&[
+        "fn main() {",
+        "    a := 1",
+        "    print(a < a)",
+        "    print(a <= a)",
+        "    print(a > a)",
+        "    print(a >= a)",
+        "    print(a == a)",
+        "    print(a != a)",
+        "}",
+    ]);
+    for mnemonic in ["lt.s", "le.s", "gt.s", "ge.s"] {
+        assert!(output.contains(&format!(":i8 = {mnemonic} ")), "{mnemonic}");
+    }
+    for mnemonic in ["eq", "ne"] {
+        assert!(
+            output.contains(&format!(":i8 = {mnemonic} t")),
+            "{mnemonic}"
+        );
+        assert!(!output.contains(&format!("{mnemonic}.")), "{mnemonic}");
+    }
+}
+
+/// Comparing two `bool`s loads them unsigned and compares with `eq`, giving an `i8`.
+#[test]
+fn bool_equality_loads_unsigned() {
+    let output = main_ir(&[
+        "fn main() {",
+        "    a := true",
+        "    b := false",
+        "    print(a == b)",
+        "}",
+    ]);
+    assert!(output.contains("  t2:i8 = load.u a\n"), "{output}");
+    assert!(output.contains("  t3:i8 = load.u b\n"), "{output}");
+    assert!(output.contains("  t4:i8 = eq t2, t3\n"), "{output}");
+}
+
+/// Arithmetic on `i64` is signed: every checked operation prints `.s`.
+#[test]
+fn arithmetic_prints_the_signed_suffix() {
+    let output = main_ir(&[
+        "fn main() {",
+        "    a := 7",
+        "    print(a + a)",
+        "    print(a - a)",
+        "    print(a * a)",
+        "    print(a / a)",
+        "    print(a % a)",
+        "    print(-a)",
+        "}",
+    ]);
+    for mnemonic in ["add.s", "sub.s", "mul.s", "div.s", "rem.s"] {
+        assert!(
+            output.contains(&format!(":i64 = {mnemonic} t")),
+            "{mnemonic}"
+        );
+    }
+    assert!(!output.contains(".u "), "{output}");
+}
+
+/// The IR text of a program has no `?` type: every temp has one.
+#[test]
+fn every_lowered_temp_has_a_type() {
+    let output = ir_text(&text(&[
+        "fn fib(n: i64) -> i64 {",
+        "    if n < 2 && n > 0 || n == 5 {",
+        "        return n",
+        "    }",
+        "    return fib(n - 1) + fib(n - 2)",
+        "}",
+        "fn main() {",
+        "    for i in 0..=3 {",
+        "        print(fib(i))",
+        "    }",
+        "}",
+    ]));
+    assert!(!output.contains(":?"), "{output}");
+}
+
+/// Printing the same program twice gives the same text.
+#[test]
+fn typed_ir_text_is_deterministic() {
+    let source = text(&[
+        "fn f(a: i64, flag: bool) -> bool {",
+        "    return flag && a < 3",
+        "}",
+        "fn main() {",
+        "    print(f(1, true))",
+        "}",
+    ]);
+    assert_eq!(ir_text(&source), ir_text(&source));
 }

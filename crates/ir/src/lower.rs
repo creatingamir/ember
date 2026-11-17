@@ -10,13 +10,17 @@ use ast::{
     AssignOp, BinaryOp, Block as AstBlock, ElseBranch, Expr, ExprKind, ForKind, Ident, NodeId,
     Stmt, StmtKind, UnaryOp,
 };
-use check::{Binding, Checked, Type};
+use check::{Binding, Checked, TypeId, TypeKind};
 use source::{Diagnostic, SourceFile, Span};
 
 use crate::blocks::remove_unreachable;
 use crate::{
-    BinOp, Block, BlockId, Function, Inst, Loc, Module, PrintKind, Slot, SlotId, Temp, Terminator,
+    BinOp, Block, BlockId, Function, Inst, IrType, Loc, Module, Param, PrintKind, Sign, Slot,
+    SlotId, Temp, Terminator,
 };
+
+/// The internal error for a value whose type the checker did not record, or that has no value.
+const MISSING_TYPE: &str = "an expression has no type";
 
 /// The name of the hidden slot that holds the value of an `&&`.
 const AND_SLOT: &str = "$and";
@@ -39,6 +43,29 @@ pub fn lower(
         functions.push(lowering.lower_function(function)?);
     }
     Ok(Module { functions })
+}
+
+/// The IR type of a value and how its bits are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ValueType {
+    /// The width.
+    ty: IrType,
+    /// Signed for signed integers, unsigned for unsigned integers and `bool`.
+    sign: Sign,
+}
+
+impl ValueType {
+    /// The type of a `bool`: an `i8` holding 0 or 1.
+    const BOOL: ValueType = ValueType {
+        ty: IrType::I8,
+        sign: Sign::Unsigned,
+    };
+
+    /// The type that stands in for an unknown one after an internal error has been recorded.
+    const PLACEHOLDER: ValueType = ValueType {
+        ty: IrType::I64,
+        sign: Sign::Signed,
+    };
 }
 
 /// A block that is still being filled in; its terminator is set when the block ends.
@@ -91,14 +118,16 @@ struct FunctionLowering<'a> {
     error: Option<Diagnostic>,
     /// The slots created so far.
     slots: Vec<Slot>,
+    /// The type of the value in each slot: `slot_types[k]` belongs to `slots[k]`.
+    slot_types: Vec<ValueType>,
     /// The slot of every parameter, `let` and loop variable, by its declaring node id.
     slot_of: HashMap<NodeId, SlotId>,
     /// The blocks created so far; the block at index `i` has id `BlockId(i)`.
     blocks: Vec<BlockBuilder>,
     /// The block that instructions are added to.
     current: BlockId,
-    /// The number of the next temp.
-    next_temp: u32,
+    /// The type of every temp created so far: `temp_types[n]` is the type of `tn`.
+    temp_types: Vec<IrType>,
     /// The loops that enclose the statement being lowered, innermost last.
     loops: Vec<LoopTargets>,
 }
@@ -112,10 +141,11 @@ impl<'a> FunctionLowering<'a> {
             span,
             error: None,
             slots: Vec::new(),
+            slot_types: Vec::new(),
             slot_of: HashMap::new(),
             blocks: Vec::new(),
             current: BlockId(0),
-            next_temp: 0,
+            temp_types: Vec::new(),
             loops: Vec::new(),
         };
         lowering.new_block();
@@ -124,17 +154,23 @@ impl<'a> FunctionLowering<'a> {
 
     /// Lowers one function, then removes the blocks that nothing jumps to.
     fn lower_function(mut self, function: &ast::Function) -> Result<Function, Diagnostic> {
-        let returns_value = function.return_type.is_some();
+        let ret = self.function_return(function.name.span, &function.name.name);
 
         let mut params = Vec::new();
         for param in &function.params {
-            params.push(self.declare_slot(&param.name.name, param.id));
+            let value_type = self.local_type(param.id);
+            let slot = self.declare_slot(&param.name.name, param.id, value_type);
+            params.push(Param {
+                slot,
+                ty: value_type.ty,
+                sign: value_type.sign,
+            });
         }
 
         self.lower_block(&function.body);
 
         // The checker guarantees that a function with a value never falls off its end.
-        let end = if returns_value {
+        let end = if ret.is_some() {
             Terminator::Unreachable
         } else {
             Terminator::Return(None)
@@ -162,8 +198,9 @@ impl<'a> FunctionLowering<'a> {
             None => Ok(Function {
                 name: function.name.name.clone(),
                 params,
-                returns_value,
+                ret: ret.map(|value_type| value_type.ty),
                 slots: self.slots,
+                temp_types: self.temp_types,
                 blocks,
                 span: function.name.span,
             }),
@@ -176,6 +213,71 @@ impl<'a> FunctionLowering<'a> {
             let message = format!("internal compiler error: {what}");
             self.error = Some(Diagnostic::error(message, span));
         }
+    }
+
+    /// Records that the checker did not record a type; this error has no better place than span 0..0.
+    fn missing_type_error(&mut self) {
+        self.internal_error(Span::new(0, 0), MISSING_TYPE);
+    }
+
+    /// The IR type of a checker type, or the internal error for `()`, the checker-only untyped
+    /// integer and a width the IR does not have.
+    fn value_type_of(&self, id: TypeId) -> Result<ValueType, &'static str> {
+        match self.checked.types.kind(id) {
+            TypeKind::Bool => Ok(ValueType::BOOL),
+            TypeKind::Int { bits, signed } => {
+                let ty = match bits {
+                    8 => IrType::I8,
+                    16 => IrType::I16,
+                    32 => IrType::I32,
+                    64 => IrType::I64,
+                    _ => return Err("a type has no IR width"),
+                };
+                let sign = if signed { Sign::Signed } else { Sign::Unsigned };
+                Ok(ValueType { ty, sign })
+            }
+            TypeKind::Unit | TypeKind::UntypedInt => Err(MISSING_TYPE),
+        }
+    }
+
+    /// The type of a value from its checker type; a missing or valueless type is an internal error.
+    fn value_type(&mut self, id: Option<TypeId>) -> ValueType {
+        let Some(id) = id else {
+            self.missing_type_error();
+            return ValueType::PLACEHOLDER;
+        };
+        match self.value_type_of(id) {
+            Ok(value_type) => value_type,
+            Err(what) => {
+                self.internal_error(Span::new(0, 0), what);
+                ValueType::PLACEHOLDER
+            }
+        }
+    }
+
+    /// The type of an expression, as the checker recorded it.
+    fn expr_type(&mut self, expr: &Expr) -> ValueType {
+        let id = self.checked.expr_types.get(&expr.id).copied();
+        self.value_type(id)
+    }
+
+    /// The type of a parameter, `let` or loop variable, by its declaring node.
+    fn local_type(&mut self, node: NodeId) -> ValueType {
+        let id = self.checked.local_types.get(&node).copied();
+        self.value_type(id)
+    }
+
+    /// The result type of a user function, or `None` when it returns nothing.
+    fn function_return(&mut self, span: Span, name: &str) -> Option<ValueType> {
+        let Some(signature) = self.checked.signatures.get(name) else {
+            self.internal_error(span, &format!("the function `{name}` has no signature"));
+            return None;
+        };
+        if signature.ret == TypeId::UNIT {
+            return None;
+        }
+        let id = Some(signature.ret);
+        Some(self.value_type(id))
     }
 
     /// Converts a count to `u32`; a count that does not fit is an internal error.
@@ -251,27 +353,41 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    /// Returns a temp that has not been used yet.
-    fn new_temp(&mut self) -> Temp {
-        let temp = Temp(self.next_temp);
-        self.next_temp += 1;
+    /// Returns a temp of type `ty` that has not been used yet.
+    fn new_temp(&mut self, ty: IrType) -> Temp {
+        let temp = Temp(self.count_as_u32(self.temp_types.len()));
+        self.temp_types.push(ty);
         temp
     }
 
-    /// Creates a slot with the given name.
-    fn new_slot(&mut self, name: &str) -> SlotId {
+    /// Creates a slot with the given name, sized for a value of type `value_type`.
+    fn new_slot(&mut self, name: &str, value_type: ValueType) -> SlotId {
         let id = SlotId(self.count_as_u32(self.slots.len()));
         self.slots.push(Slot {
             name: name.to_string(),
+            size: value_type.ty.bytes(),
+            align: value_type.ty.bytes(),
         });
+        self.slot_types.push(value_type);
         id
     }
 
     /// Creates the slot of a parameter, `let` or loop variable and remembers it by node id.
-    fn declare_slot(&mut self, name: &str, node: NodeId) -> SlotId {
-        let slot = self.new_slot(name);
+    fn declare_slot(&mut self, name: &str, node: NodeId, value_type: ValueType) -> SlotId {
+        let slot = self.new_slot(name, value_type);
         self.slot_of.insert(node, slot);
         slot
+    }
+
+    /// The type of the value in a slot.
+    fn slot_type(&mut self, slot: SlotId) -> ValueType {
+        match self.slot_types.get(slot.0 as usize) {
+            Some(value_type) => *value_type,
+            None => {
+                self.internal_error(self.span, "a slot does not exist");
+                ValueType::PLACEHOLDER
+            }
+        }
     }
 
     /// Finds the slot of the local that a name expression or an assignment statement refers to.
@@ -282,17 +398,22 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    /// Adds `dst = const value` and returns `dst`.
-    fn emit_const(&mut self, value: i64) -> Temp {
-        let dst = self.new_temp();
+    /// Adds `dst = const value` with `dst` of type `ty`, and returns `dst`.
+    fn emit_const(&mut self, value: i64, ty: IrType) -> Temp {
+        let dst = self.new_temp(ty);
         self.emit(Inst::Const { dst, value });
         dst
     }
 
-    /// Adds `dst = load slot` and returns `dst`.
+    /// Adds `dst = load slot`, with `dst` typed like the slot's value, and returns `dst`.
     fn emit_load(&mut self, slot: SlotId) -> Temp {
-        let dst = self.new_temp();
-        self.emit(Inst::Load { dst, slot });
+        let value_type = self.slot_type(slot);
+        let dst = self.new_temp(value_type.ty);
+        self.emit(Inst::Load {
+            dst,
+            slot,
+            sign: value_type.sign,
+        });
         dst
     }
 
@@ -301,9 +422,10 @@ impl<'a> FunctionLowering<'a> {
         self.emit(Inst::Store { slot, src });
     }
 
-    /// Adds `dst = lhs op rhs` and returns `dst`.
-    fn emit_binary(&mut self, op: BinOp, lhs: Temp, rhs: Temp, loc: Loc) -> Temp {
-        let dst = self.new_temp();
+    /// Adds `dst = lhs op rhs` with `dst` of type `ty`, and returns `dst`.
+    fn emit_binary(&mut self, op: BinOp, operands: [Temp; 2], loc: Loc, ty: IrType) -> Temp {
+        let [lhs, rhs] = operands;
+        let dst = self.new_temp(ty);
         self.emit(Inst::Binary {
             dst,
             op,
@@ -351,7 +473,8 @@ impl<'a> FunctionLowering<'a> {
     /// Lowers `x := e`; the slot is created after the value, so hidden slots of the value come first.
     fn lower_let(&mut self, stmt: &Stmt, name: &Ident, value: &Expr) {
         let src = self.lower_expr(value);
-        let slot = self.declare_slot(&name.name, stmt.id);
+        let value_type = self.local_type(stmt.id);
+        let slot = self.declare_slot(&name.name, stmt.id, value_type);
         self.emit_store(slot, src);
     }
 
@@ -368,12 +491,13 @@ impl<'a> FunctionLowering<'a> {
             self.internal_error(stmt.span, "the `@=` assignment is not supported");
         }
 
-        match compound_op(op) {
+        let target = self.slot_type(slot);
+        match compound_op(op, target.sign) {
             Some(bin_op) => {
                 let old = self.emit_load(slot);
                 let operand = self.lower_expr(value);
                 let loc = self.loc(stmt.span);
-                let new = self.emit_binary(bin_op, old, operand, loc);
+                let new = self.emit_binary(bin_op, [old, operand], loc, target.ty);
                 self.emit_store(slot, new);
             }
             None => {
@@ -490,23 +614,24 @@ impl<'a> FunctionLowering<'a> {
         let exit = self.new_block();
 
         let start = self.lower_expr(range.start);
-        let var_slot = self.declare_slot(&range.var.name, stmt.id);
+        let var_type = self.local_type(stmt.id);
+        let var_slot = self.declare_slot(&range.var.name, stmt.id, var_type);
         self.emit_store(var_slot, start);
         let end = self.lower_expr(range.end);
-        let end_slot = self.new_slot(END_SLOT);
+        let end_slot = self.new_slot(END_SLOT, var_type);
         self.emit_store(end_slot, end);
         self.set_terminator(Terminator::Jump(header));
 
         let loc = self.loc(stmt.span);
         let compare = if range.inclusive {
-            BinOp::Le
+            BinOp::Le(var_type.sign)
         } else {
-            BinOp::Lt
+            BinOp::Lt(var_type.sign)
         };
         self.switch_to(header);
         let current = self.emit_load(var_slot);
         let limit = self.emit_load(end_slot);
-        let in_range = self.emit_binary(compare, current, limit, loc);
+        let in_range = self.emit_binary(compare, [current, limit], loc, IrType::I8);
         self.set_terminator(Terminator::Branch {
             cond: in_range,
             then_to: body_id,
@@ -540,7 +665,7 @@ impl<'a> FunctionLowering<'a> {
     ) {
         let current = self.emit_load(var_slot);
         let limit = self.emit_load(end_slot);
-        let at_end = self.emit_binary(BinOp::Eq, current, limit, loc);
+        let at_end = self.emit_binary(BinOp::Eq, [current, limit], loc, IrType::I8);
         let increment = self.new_block();
         self.set_terminator(Terminator::Branch {
             cond: at_end,
@@ -554,9 +679,11 @@ impl<'a> FunctionLowering<'a> {
 
     /// Adds `i = i + 1` to the current block and jumps to the loop header.
     fn lower_increment(&mut self, var_slot: SlotId, header: BlockId, loc: Loc) {
+        let var_type = self.slot_type(var_slot);
         let current = self.emit_load(var_slot);
-        let one = self.emit_const(1);
-        let next = self.emit_binary(BinOp::Add, current, one, loc);
+        let one = self.emit_const(1, var_type.ty);
+        let add = BinOp::Add(var_type.sign);
+        let next = self.emit_binary(add, [current, one], loc, var_type.ty);
         self.emit_store(var_slot, next);
         self.set_terminator(Terminator::Jump(header));
     }
@@ -609,7 +736,7 @@ impl<'a> FunctionLowering<'a> {
     fn lower_expr(&mut self, expr: &Expr) -> Temp {
         match &expr.kind {
             ExprKind::Int(value) => self.lower_int(expr, *value),
-            ExprKind::Bool(value) => self.emit_const(i64::from(*value)),
+            ExprKind::Bool(value) => self.emit_const(i64::from(*value), IrType::I8),
             ExprKind::Name(_) => self.lower_name(expr),
             ExprKind::Unary { op, operand } => self.lower_unary(expr, *op, operand),
             ExprKind::Binary { op, left, right } => self.lower_binary(expr, *op, left, right),
@@ -626,7 +753,8 @@ impl<'a> FunctionLowering<'a> {
                 i64::MAX
             }
         };
-        self.emit_const(value)
+        let value_type = self.expr_type(expr);
+        self.emit_const(value, value_type.ty)
     }
 
     /// Lowers a read of a variable.
@@ -635,7 +763,7 @@ impl<'a> FunctionLowering<'a> {
             Some(slot) => self.emit_load(slot),
             None => {
                 self.internal_error(expr.span, "a name is not bound to a variable");
-                self.emit_const(0)
+                self.emit_const(0, IrType::I64)
             }
         }
     }
@@ -646,7 +774,7 @@ impl<'a> FunctionLowering<'a> {
             UnaryOp::Neg => self.lower_neg(expr, operand),
             UnaryOp::Not => {
                 let src = self.lower_expr(operand);
-                let dst = self.new_temp();
+                let dst = self.new_temp(IrType::I8);
                 self.emit(Inst::Not { dst, src });
                 dst
             }
@@ -660,11 +788,13 @@ impl<'a> FunctionLowering<'a> {
     /// Lowers `-e`; the literal `-9223372036854775808` is a single constant.
     fn lower_neg(&mut self, expr: &Expr, operand: &Expr) -> Temp {
         if operand.kind == ExprKind::Int(i64::MIN.unsigned_abs()) {
-            return self.emit_const(i64::MIN);
+            let value_type = self.expr_type(expr);
+            return self.emit_const(i64::MIN, value_type.ty);
         }
 
         let src = self.lower_expr(operand);
-        let dst = self.new_temp();
+        let value_type = self.expr_type(expr);
+        let dst = self.new_temp(value_type.ty);
         let loc = self.loc(expr.span);
         self.emit(Inst::Neg { dst, src, loc });
         dst
@@ -683,14 +813,17 @@ impl<'a> FunctionLowering<'a> {
     fn lower_plain_binary(&mut self, expr: &Expr, op: BinaryOp, left: &Expr, right: &Expr) -> Temp {
         let lhs = self.lower_expr(left);
         let rhs = self.lower_expr(right);
-        match bin_op(op) {
+        // Both operands have the same type, so the left one decides the signedness.
+        let operand_type = self.expr_type(left);
+        match bin_op(op, operand_type.sign) {
             Some(bin_op) => {
                 let loc = self.loc(expr.span);
-                self.emit_binary(bin_op, lhs, rhs, loc)
+                let result_type = self.expr_type(expr);
+                self.emit_binary(bin_op, [lhs, rhs], loc, result_type.ty)
             }
             None => {
                 self.internal_error(expr.span, &format!("the operator `{op}` is not supported"));
-                self.emit_const(0)
+                self.emit_const(0, IrType::I64)
             }
         }
     }
@@ -705,7 +838,7 @@ impl<'a> FunctionLowering<'a> {
         left: &Expr,
         right: &Expr,
     ) -> Temp {
-        let slot = self.new_slot(slot_name);
+        let slot = self.new_slot(slot_name, ValueType::BOOL);
         let right_block = self.new_block();
         let join = self.new_block();
 
@@ -737,7 +870,7 @@ impl<'a> FunctionLowering<'a> {
             Some(result) => result,
             None => {
                 self.internal_error(expr.span, "a call without a value is used as a value");
-                self.emit_const(0)
+                self.emit_const(0, IrType::I64)
             }
         }
     }
@@ -758,11 +891,9 @@ impl<'a> FunctionLowering<'a> {
             arg_temps.push(self.lower_expr(arg));
         }
 
-        let dst = if self.function_returns_value(expr.span, &callee.name) {
-            Some(self.new_temp())
-        } else {
-            None
-        };
+        let dst = self
+            .function_return(expr.span, &callee.name)
+            .map(|value_type| self.new_temp(value_type.ty));
         self.emit(Inst::Call {
             dst,
             func: callee.name.clone(),
@@ -785,53 +916,49 @@ impl<'a> FunctionLowering<'a> {
 
     /// Chooses how to print a value from its type.
     fn print_kind(&mut self, arg: &Expr) -> PrintKind {
-        match self.checked.expr_types.get(&arg.id) {
-            Some(Type::I64) => PrintKind::I64,
-            Some(Type::Bool) => PrintKind::Bool,
-            Some(Type::Unit) | None => {
+        let Some(id) = self.checked.expr_types.get(&arg.id).copied() else {
+            self.missing_type_error();
+            return PrintKind::I64;
+        };
+        match self.checked.types.kind(id) {
+            TypeKind::Int {
+                bits: 64,
+                signed: true,
+            } => PrintKind::I64,
+            TypeKind::Bool => PrintKind::Bool,
+            _ => {
                 self.internal_error(arg.span, "the type of a printed value is unknown");
                 PrintKind::I64
             }
         }
     }
-
-    /// Tells whether a user function returns a value; an unknown function is an internal error.
-    fn function_returns_value(&mut self, span: Span, name: &str) -> bool {
-        match self.checked.signatures.get(name) {
-            Some(signature) => signature.ret != Type::Unit,
-            None => {
-                self.internal_error(span, &format!("the function `{name}` has no signature"));
-                false
-            }
-        }
-    }
 }
 
-/// Returns the operation of a compound assignment, or `None` for a plain `=` (and for `@=`).
-fn compound_op(op: AssignOp) -> Option<BinOp> {
+/// Returns the operation of a compound assignment on operands of signedness `sign`, or `None` for a plain `=` (and for `@=`).
+fn compound_op(op: AssignOp, sign: Sign) -> Option<BinOp> {
     match op {
-        AssignOp::Add => Some(BinOp::Add),
-        AssignOp::Sub => Some(BinOp::Sub),
-        AssignOp::Mul => Some(BinOp::Mul),
-        AssignOp::Div => Some(BinOp::Div),
+        AssignOp::Add => Some(BinOp::Add(sign)),
+        AssignOp::Sub => Some(BinOp::Sub(sign)),
+        AssignOp::Mul => Some(BinOp::Mul(sign)),
+        AssignOp::Div => Some(BinOp::Div(sign)),
         AssignOp::Assign | AssignOp::MatMul => None,
     }
 }
 
-/// Returns the IR operation of an infix operator, or `None` when the IR has no such operation.
-fn bin_op(op: BinaryOp) -> Option<BinOp> {
+/// Returns the IR operation of an infix operator on operands of signedness `sign`, or `None` when the IR has no such operation.
+fn bin_op(op: BinaryOp, sign: Sign) -> Option<BinOp> {
     match op {
-        BinaryOp::Add => Some(BinOp::Add),
-        BinaryOp::Sub => Some(BinOp::Sub),
-        BinaryOp::Mul => Some(BinOp::Mul),
-        BinaryOp::Div => Some(BinOp::Div),
-        BinaryOp::Rem => Some(BinOp::Rem),
+        BinaryOp::Add => Some(BinOp::Add(sign)),
+        BinaryOp::Sub => Some(BinOp::Sub(sign)),
+        BinaryOp::Mul => Some(BinOp::Mul(sign)),
+        BinaryOp::Div => Some(BinOp::Div(sign)),
+        BinaryOp::Rem => Some(BinOp::Rem(sign)),
         BinaryOp::Eq => Some(BinOp::Eq),
         BinaryOp::Ne => Some(BinOp::Ne),
-        BinaryOp::Lt => Some(BinOp::Lt),
-        BinaryOp::Le => Some(BinOp::Le),
-        BinaryOp::Gt => Some(BinOp::Gt),
-        BinaryOp::Ge => Some(BinOp::Ge),
+        BinaryOp::Lt => Some(BinOp::Lt(sign)),
+        BinaryOp::Le => Some(BinOp::Le(sign)),
+        BinaryOp::Gt => Some(BinOp::Gt(sign)),
+        BinaryOp::Ge => Some(BinOp::Ge(sign)),
         BinaryOp::MatMul
         | BinaryOp::Shl
         | BinaryOp::Shr

@@ -25,6 +25,56 @@ pub struct Loc {
     pub col: u32,
 }
 
+/// The type of an IR value: a width, without signedness (decision 0029). `bool` is `I8` holding 0 or 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IrType {
+    /// 8 bits.
+    I8,
+    /// 16 bits.
+    I16,
+    /// 32 bits.
+    I32,
+    /// 64 bits.
+    I64,
+}
+
+impl IrType {
+    /// The width in bits: 8, 16, 32 or 64.
+    pub fn bits(self) -> u32 {
+        match self {
+            IrType::I8 => 8,
+            IrType::I16 => 16,
+            IrType::I32 => 32,
+            IrType::I64 => 64,
+        }
+    }
+
+    /// The size in bytes, which is also the alignment: 1, 2, 4 or 8.
+    pub fn bytes(self) -> u32 {
+        self.bits() / 8
+    }
+}
+
+/// Whether an operation, load or parameter treats its bits as signed or unsigned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Sign {
+    /// Two's-complement signed.
+    Signed,
+    /// Unsigned.
+    Unsigned,
+}
+
+/// One parameter: the slot it is stored in on entry, its type and its signedness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Param {
+    /// The slot the parameter is stored in on entry.
+    pub slot: SlotId,
+    /// The type of the parameter.
+    pub ty: IrType,
+    /// How the bits are read when they are loaded with extension.
+    pub sign: Sign,
+}
+
 /// A whole program: its functions in source order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
@@ -37,23 +87,29 @@ pub struct Module {
 pub struct Function {
     /// The function name.
     pub name: String,
-    /// The slot each parameter is stored in on entry, in order.
-    pub params: Vec<SlotId>,
-    /// Whether the function returns a value (every value is 64 bits wide).
-    pub returns_value: bool,
+    /// The parameters, in order.
+    pub params: Vec<Param>,
+    /// The type of the result, or `None` when the function returns nothing.
+    pub ret: Option<IrType>,
     /// The parameters first, then locals and hidden slots in creation order.
     pub slots: Vec<Slot>,
+    /// The type of every temp: `temp_types[n]` is the type of `tn`.
+    pub temp_types: Vec<IrType>,
     /// The blocks, where `blocks[i].id == BlockId(i)`; `blocks[0]` is the entry.
     pub blocks: Vec<Block>,
     /// Where the function's name is written; errors about the whole function point here.
     pub span: Span,
 }
 
-/// A memory cell that holds one named variable.
+/// Memory for one variable: sized and aligned, without a type (decision 0029).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Slot {
     /// The source name; hidden slots are named `$end`, `$and` and `$or`, and names may repeat.
     pub name: String,
+    /// The size in bytes.
+    pub size: u32,
+    /// The alignment in bytes.
+    pub align: u32,
 }
 
 /// A straight run of instructions that ends in one terminator.
@@ -74,7 +130,7 @@ pub enum Inst {
     Const {
         /// The temp that receives the value.
         dst: Temp,
-        /// The constant.
+        /// The value in the type of `dst`, as an `i64` bit pattern (a `u64` above `i64::MAX` is its two's complement).
         value: i64,
     },
     /// `dst = the value in slot`.
@@ -83,6 +139,8 @@ pub enum Inst {
         dst: Temp,
         /// The slot that is read.
         slot: SlotId,
+        /// Whether an 8- or 16-bit value is sign- or zero-extended; unused for wider types.
+        sign: Sign,
     },
     /// `slot = src`.
     Store {
@@ -139,30 +197,32 @@ pub enum Inst {
 }
 
 /// The binary operations; `Add` to `Rem` are checked for overflow and division by zero.
+///
+/// Signedness is part of the operation, because the backend needs it (decision 0029).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     /// `+`
-    Add,
+    Add(Sign),
     /// `-`
-    Sub,
+    Sub(Sign),
     /// `*`
-    Mul,
-    /// `/`; panics on a zero divisor ("division by zero", first) or `i64::MIN / -1` ("integer overflow").
-    Div,
-    /// `%`; panics like `Div`, including for `i64::MIN % -1`.
-    Rem,
+    Mul(Sign),
+    /// `/`; panics on a zero divisor ("division by zero", first) or `MIN / -1` ("integer overflow").
+    Div(Sign),
+    /// `%`; panics like `Div`, including for `MIN % -1`.
+    Rem(Sign),
     /// `==`
     Eq,
     /// `!=`
     Ne,
     /// `<`
-    Lt,
+    Lt(Sign),
     /// `<=`
-    Le,
+    Le(Sign),
     /// `>`
-    Gt,
+    Gt(Sign),
     /// `>=`
-    Ge,
+    Ge(Sign),
 }
 
 /// How `print` shows its value.

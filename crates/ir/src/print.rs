@@ -3,10 +3,22 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use crate::{BinOp, BlockId, Function, Inst, Loc, Module, PrintKind, SlotId, Temp, Terminator};
+use crate::{
+    BinOp, BlockId, Function, Inst, IrType, Loc, Module, PrintKind, Sign, SlotId, Temp, Terminator,
+};
 
-/// What a slot is called when the module has no slot with that number.
+/// What a slot is called when the function has no slot with that number.
 const UNKNOWN_SLOT: &str = "?";
+
+/// What a temp's type is written as when the function lists no type for it.
+const UNKNOWN_TYPE: &str = "?";
+
+impl fmt::Display for IrType {
+    /// Writes the type as `i8`, `i16`, `i32` or `i64`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "i{}", self.bits())
+    }
+}
 
 impl fmt::Display for Temp {
     /// Writes the temp as `t3`.
@@ -44,25 +56,27 @@ fn print_function(function: &Function) -> String {
 
     let mut params = Vec::new();
     for param in &function.params {
-        params.push(label(&labels, *param));
+        let name = label(&labels, param.slot);
+        let sign = extension_suffix(param.ty, param.sign);
+        params.push(format!("{name}:{}{sign}", param.ty));
     }
     let mut out = format!("fn {}({})", function.name, params.join(", "));
-    if function.returns_value {
-        out.push_str(" -> i64");
+    if let Some(ret) = function.ret {
+        out.push_str(&format!(" -> {ret}"));
     }
     out.push_str(" {\n");
 
     out.push_str("  slots:");
-    for (index, name) in labels.iter().enumerate() {
+    for (index, (name, slot)) in labels.iter().zip(&function.slots).enumerate() {
         out.push_str(if index == 0 { " " } else { ", " });
-        out.push_str(name);
+        out.push_str(&format!("{name}:{}", slot.size));
     }
     out.push('\n');
 
     for block in &function.blocks {
         out.push_str(&format!("{}:\n", block.id));
         for inst in &block.insts {
-            out.push_str(&format!("  {}\n", inst_text(inst, &labels)));
+            out.push_str(&format!("  {}\n", inst_text(inst, function, &labels)));
         }
         out.push_str(&format!("  {}\n", terminator_text(&block.term)));
     }
@@ -93,11 +107,41 @@ fn label(labels: &[String], slot: SlotId) -> &str {
     }
 }
 
+/// The type of a temp as written, or `?` when the function lists none.
+fn temp_type(function: &Function, temp: Temp) -> String {
+    match function.temp_types.get(temp.0 as usize) {
+        Some(ty) => ty.to_string(),
+        None => UNKNOWN_TYPE.to_string(),
+    }
+}
+
+/// The text before `=` of an instruction that defines a temp: `t3:i64`.
+fn defined(function: &Function, temp: Temp) -> String {
+    format!("{temp}:{}", temp_type(function, temp))
+}
+
+/// `.s` or `.u` for the 8- and 16-bit types, which are loaded with extension; nothing for wider ones.
+fn extension_suffix(ty: IrType, sign: Sign) -> &'static str {
+    match (ty, sign) {
+        (IrType::I8 | IrType::I16, Sign::Signed) => ".s",
+        (IrType::I8 | IrType::I16, Sign::Unsigned) => ".u",
+        (IrType::I32 | IrType::I64, _) => "",
+    }
+}
+
 /// Shows one instruction without indentation.
-fn inst_text(inst: &Inst, labels: &[String]) -> String {
+fn inst_text(inst: &Inst, function: &Function, labels: &[String]) -> String {
     match inst {
-        Inst::Const { dst, value } => format!("{dst} = const {value}"),
-        Inst::Load { dst, slot } => format!("{dst} = load {}", label(labels, *slot)),
+        Inst::Const { dst, value } => format!("{} = const {value}", defined(function, *dst)),
+        Inst::Load { dst, slot, sign } => {
+            // A temp without a type has no width, so it prints no extension.
+            let suffix = match function.temp_types.get(dst.0 as usize) {
+                Some(ty) => extension_suffix(*ty, *sign),
+                None => "",
+            };
+            let dst = defined(function, *dst);
+            format!("{dst} = load{suffix} {}", label(labels, *slot))
+        }
         Inst::Store { slot, src } => format!("store {}, {src}", label(labels, *slot)),
         Inst::Binary {
             dst,
@@ -106,18 +150,19 @@ fn inst_text(inst: &Inst, labels: &[String]) -> String {
             rhs,
             loc,
         } => {
+            let dst = defined(function, *dst);
             let mut text = format!("{dst} = {} {lhs}, {rhs}", mnemonic(*op));
             if can_panic(*op) {
                 text.push_str(&format!(" {loc}"));
             }
             text
         }
-        Inst::Neg { dst, src, loc } => format!("{dst} = neg {src} {loc}"),
-        Inst::Not { dst, src } => format!("{dst} = not {src}"),
+        Inst::Neg { dst, src, loc } => format!("{} = neg {src} {loc}", defined(function, *dst)),
+        Inst::Not { dst, src } => format!("{} = not {src}", defined(function, *dst)),
         Inst::Call { dst, func, args } => {
             let call = format!("call {func}({})", temp_list(args));
             match dst {
-                Some(dst) => format!("{dst} = {call}"),
+                Some(dst) => format!("{} = {call}", defined(function, *dst)),
                 None => call,
             }
         }
@@ -149,20 +194,25 @@ fn temp_list(temps: &[Temp]) -> String {
     names.join(", ")
 }
 
-/// Returns the name of an operation in the printed IR.
-fn mnemonic(op: BinOp) -> &'static str {
-    match op {
-        BinOp::Add => "add",
-        BinOp::Sub => "sub",
-        BinOp::Mul => "mul",
-        BinOp::Div => "div",
-        BinOp::Rem => "rem",
-        BinOp::Eq => "eq",
-        BinOp::Ne => "ne",
-        BinOp::Lt => "lt",
-        BinOp::Le => "le",
-        BinOp::Gt => "gt",
-        BinOp::Ge => "ge",
+/// Returns the name of an operation in the printed IR, with `.s` or `.u` where the sign matters.
+fn mnemonic(op: BinOp) -> String {
+    let (name, sign) = match op {
+        BinOp::Add(sign) => ("add", Some(sign)),
+        BinOp::Sub(sign) => ("sub", Some(sign)),
+        BinOp::Mul(sign) => ("mul", Some(sign)),
+        BinOp::Div(sign) => ("div", Some(sign)),
+        BinOp::Rem(sign) => ("rem", Some(sign)),
+        BinOp::Eq => ("eq", None),
+        BinOp::Ne => ("ne", None),
+        BinOp::Lt(sign) => ("lt", Some(sign)),
+        BinOp::Le(sign) => ("le", Some(sign)),
+        BinOp::Gt(sign) => ("gt", Some(sign)),
+        BinOp::Ge(sign) => ("ge", Some(sign)),
+    };
+    match sign {
+        Some(Sign::Signed) => format!("{name}.s"),
+        Some(Sign::Unsigned) => format!("{name}.u"),
+        None => name.to_string(),
     }
 }
 
@@ -170,7 +220,7 @@ fn mnemonic(op: BinOp) -> &'static str {
 fn can_panic(op: BinOp) -> bool {
     matches!(
         op,
-        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+        BinOp::Add(_) | BinOp::Sub(_) | BinOp::Mul(_) | BinOp::Div(_) | BinOp::Rem(_)
     )
 }
 

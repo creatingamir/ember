@@ -1,13 +1,16 @@
 //! The Ember checker: resolves names and checks types, and records what it learns in tables keyed by node id.
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 
 use ast::{
     AssignOp, BinaryOp, Block, ElseBranch, Expr, ExprKind, ForKind, Function, Ident, NodeId,
     Program, Stmt, StmtKind, TypeExpr, UnaryOp,
 };
 use source::{Diagnostic, Span};
+
+mod types;
+
+pub use types::{TypeId, TypeKind, TypeTable};
 
 /// The name of the built-in print function.
 const PRINT: &str = "print";
@@ -22,29 +25,6 @@ const I64_MAX_MAGNITUDE: u64 = i64::MAX.unsigned_abs();
 
 /// The magnitude of `i64::MIN`, which is only allowed directly under a unary minus.
 const I64_MIN_MAGNITUDE: u64 = i64::MIN.unsigned_abs();
-
-/// A type of the Phase 1 language.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Type {
-    /// A 64-bit signed integer.
-    I64,
-    /// A boolean.
-    Bool,
-    /// No value, the result of a call to a function without a return type.
-    Unit,
-}
-
-impl fmt::Display for Type {
-    /// Writes the type as it is spelled in source, and `()` for no value.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let spelling = match self {
-            Type::I64 => "i64",
-            Type::Bool => "bool",
-            Type::Unit => "()",
-        };
-        write!(f, "{spelling}")
-    }
-}
 
 /// What a name or an assignment target refers to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,20 +41,22 @@ pub enum Binding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
     /// The parameter types, in order.
-    pub params: Vec<Type>,
-    /// The return type, `Unit` when the function has none.
-    pub ret: Type,
+    pub params: Vec<TypeId>,
+    /// The return type, `TypeId::UNIT` when the function has none.
+    pub ret: TypeId,
 }
 
 /// Everything the checker learned about a valid program.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Checked {
+    /// Every type the program uses.
+    pub types: TypeTable,
     /// The type of every expression, except a range directly after `in` in a `for`.
-    pub expr_types: HashMap<NodeId, Type>,
+    pub expr_types: HashMap<NodeId, TypeId>,
     /// What every name expression, assignment statement and call expression refers to.
     pub bindings: HashMap<NodeId, Binding>,
     /// The type of every parameter, `let` and loop variable, by its declaring node id.
-    pub local_types: HashMap<NodeId, Type>,
+    pub local_types: HashMap<NodeId, TypeId>,
     /// The signature of every user function.
     pub signatures: HashMap<String, Signature>,
 }
@@ -90,21 +72,21 @@ pub fn check(program: &Program) -> Result<Checked, Vec<Diagnostic>> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ty {
     /// A type of the language.
-    Known(Type),
+    Known(TypeId),
     /// The expression already has an error. It matches every type, so no second error follows.
     Error,
 }
 
 impl Ty {
     /// The `i64` type.
-    const I64: Ty = Ty::Known(Type::I64);
+    const I64: Ty = Ty::Known(TypeId::I64);
     /// The `bool` type.
-    const BOOL: Ty = Ty::Known(Type::Bool);
+    const BOOL: Ty = Ty::Known(TypeId::BOOL);
     /// The type of no value.
-    const UNIT: Ty = Ty::Known(Type::Unit);
+    const UNIT: Ty = Ty::Known(TypeId::UNIT);
 
     /// Returns the language type, or `None` for the error marker.
-    fn known(self) -> Option<Type> {
+    fn known(self) -> Option<TypeId> {
         match self {
             Ty::Known(ty) => Some(ty),
             Ty::Error => None,
@@ -215,6 +197,11 @@ impl Checker {
         self.diagnostics
             .sort_by_key(|diagnostic| diagnostic.span.start);
         Err(self.diagnostics)
+    }
+
+    /// The source spelling of a type, for messages.
+    fn type_name(&self, ty: TypeId) -> String {
+        self.checked.types.name(ty)
     }
 
     /// Records an error.
@@ -341,7 +328,7 @@ impl Checker {
     /// Reports a function with a return type whose body can finish without returning.
     fn check_missing_return(&mut self, function: &Function, ret: Ty) {
         let needs_value = match ret {
-            Ty::Known(ty) => ty != Type::Unit,
+            Ty::Known(ty) => ty != TypeId::UNIT,
             // An unknown return type has been reported already.
             Ty::Error => false,
         };
@@ -428,6 +415,8 @@ impl Checker {
     fn expect(&mut self, expected: Ty, found: Ty, span: Span) -> bool {
         match (expected, found) {
             (Ty::Known(expected), Ty::Known(found)) if expected != found => {
+                let expected = self.type_name(expected);
+                let found = self.type_name(found);
                 self.error(format!("expected `{expected}`, found `{found}`"), span);
                 false
             }
@@ -652,9 +641,10 @@ impl Checker {
     /// Checks a `return` without a value, which a function with a return type may not use.
     fn check_bare_return(&mut self, stmt: &Stmt) {
         if let Ty::Known(ty) = self.fn_ret
-            && ty != Type::Unit
+            && ty != TypeId::UNIT
         {
-            let message = format!("expected a return value of type `{ty}`");
+            let name = self.type_name(ty);
+            let message = format!("expected a return value of type `{name}`");
             self.error(message, stmt.span);
         }
     }
@@ -808,9 +798,11 @@ impl Checker {
         let left_ty = self.check_expr(left);
         let right_ty = self.check_expr(right);
         if let (Ty::Known(left_known), Ty::Known(right_known)) = (left_ty, right_ty) {
-            let comparable = left_known == right_known && left_known != Type::Unit;
+            let comparable = left_known == right_known && left_known != TypeId::UNIT;
             if !comparable {
-                let message = format!("cannot compare `{left_known}` with `{right_known}`");
+                let left_name = self.type_name(left_known);
+                let right_name = self.type_name(right_known);
+                let message = format!("cannot compare `{left_name}` with `{right_name}`");
                 self.error(message, expr.span);
             }
         }

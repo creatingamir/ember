@@ -6,10 +6,12 @@
 mod common;
 
 use common::{
-    FILE, asm, asm_named, binary, block_of, constant, counter_program, emit_ok, main_module,
-    main_with, program, unreachable_blocks,
+    FILE, asm, asm_named, binary, block_of, constant, counter_program, emit_ok, i64_param,
+    i64_slot, i64_temp_types, main_module, main_with, program, unreachable_blocks,
 };
-use ir::{BinOp, Block, BlockId, Function, Inst, Loc, Module, PrintKind, SlotId, Temp, Terminator};
+use ir::{
+    BinOp, Block, BlockId, Inst, IrType, Loc, Module, PrintKind, Sign, SlotId, Temp, Terminator,
+};
 use source::Span;
 use std::sync::OnceLock;
 
@@ -379,20 +381,7 @@ fn eight_parameters_are_stored_from_registers() {
 
 /// Builds a module with one function `main` made of the given instructions and terminator.
 fn module_of(insts: Vec<Inst>, term: Terminator) -> Module {
-    Module {
-        functions: vec![Function {
-            name: "main".to_string(),
-            params: vec![],
-            returns_value: false,
-            slots: vec![],
-            blocks: vec![Block {
-                id: BlockId(0),
-                insts,
-                term,
-            }],
-            span: Span::new(0, 0),
-        }],
-    }
+    main_module(vec![block_of(0, insts, term)])
 }
 
 /// A block that ends in `Unreachable` becomes a `brk` trap.
@@ -443,23 +432,15 @@ fn call_with_constants(count: u32) -> Module {
 /// A module whose `main` has `count` parameters named `p0`, `p1`, … and no body.
 fn module_with_parameters(count: u32) -> Module {
     let mut module = module_of(vec![], Terminator::Return(None));
-    module.functions[0].params = (0..count).map(SlotId).collect();
-    module.functions[0].slots = (0..count)
-        .map(|n| ir::Slot {
-            name: format!("p{n}"),
-        })
-        .collect();
+    module.functions[0].params = (0..count).map(i64_param).collect();
+    module.functions[0].slots = (0..count).map(|n| i64_slot(format!("p{n}"))).collect();
     module
 }
 
 /// A module whose `main` has `count` unused slots and returns at once.
 fn module_with_slots(count: u32) -> Module {
     let mut module = module_of(vec![], Terminator::Return(None));
-    module.functions[0].slots = (0..count)
-        .map(|n| ir::Slot {
-            name: format!("s{n}"),
-        })
-        .collect();
+    module.functions[0].slots = (0..count).map(|n| i64_slot(format!("s{n}"))).collect();
     module
 }
 
@@ -538,6 +519,7 @@ fn load_from_an_unknown_slot_is_an_internal_error() {
     let insts = vec![Inst::Load {
         dst: Temp(0),
         slot: SlotId(5),
+        sign: Sign::Signed,
     }];
     assert_internal_error(&module_of(insts, Terminator::Return(None)));
 }
@@ -632,7 +614,8 @@ fn asm_of_huge_main(tail: &[&str]) -> String {
 /// A module with one function `main` that has no slots and the given blocks.
 fn module_of_blocks(returns_value: bool, blocks: Vec<Block>) -> Module {
     let mut module = module_of(vec![], Terminator::Return(None));
-    module.functions[0].returns_value = returns_value;
+    module.functions[0].ret = returns_value.then_some(IrType::I64);
+    module.functions[0].temp_types = i64_temp_types(&blocks);
     module.functions[0].blocks = blocks;
     module
 }
@@ -1036,9 +1019,7 @@ fn slot_store_loads_the_temp_then_stores() {
         ],
         Terminator::Return(None),
     );
-    module.functions[0].slots = vec![ir::Slot {
-        name: "x".to_string(),
-    }];
+    module.functions[0].slots = vec![i64_slot("x".to_string())];
     // One slot, so the temp's cell is cell 1.
     assert_run(
         &emit_ok(&module, FILE),
@@ -1053,12 +1034,11 @@ fn slot_load_loads_the_slot_then_stores_the_temp() {
         vec![Inst::Load {
             dst: Temp(0),
             slot: SlotId(0),
+            sign: Sign::Signed,
         }],
         Terminator::Return(None),
     );
-    module.functions[0].slots = vec![ir::Slot {
-        name: "x".to_string(),
-    }];
+    module.functions[0].slots = vec![i64_slot("x".to_string())];
     assert_run(
         &emit_ok(&module, FILE),
         &["ldr x8, [sp, #0]", "str x8, [sp, #8]"],
@@ -1069,7 +1049,7 @@ fn slot_load_loads_the_slot_then_stores_the_temp() {
 #[test]
 fn a_register_read_twice_uses_one_scratch() {
     let text = asm_of_insts(
-        vec![constant(0, 1), binary(1, BinOp::Add, 0, 0)],
+        vec![constant(0, 1), binary(1, BinOp::Add(Sign::Signed), 0, 0)],
         Terminator::Return(None),
     );
     assert_run(
@@ -1087,7 +1067,11 @@ fn a_register_read_twice_uses_one_scratch() {
 #[test]
 fn comparison_loads_compares_sets_and_stores() {
     let text = asm_of_insts(
-        vec![constant(0, 1), constant(1, 2), binary(2, BinOp::Lt, 0, 1)],
+        vec![
+            constant(0, 1),
+            constant(1, 2),
+            binary(2, BinOp::Lt(Sign::Signed), 0, 1),
+        ],
         Terminator::Return(None),
     );
     assert_run(
@@ -1233,7 +1217,7 @@ fn return_value_is_loaded_into_x0_before_the_epilogue() {
 #[test]
 fn panic_path_passes_line_column_and_reason() {
     let text = asm_of_insts(
-        vec![constant(0, 1), binary(1, BinOp::Add, 0, 0)],
+        vec![constant(0, 1), binary(1, BinOp::Add(Sign::Signed), 0, 0)],
         Terminator::Return(None),
     );
     assert_run(
@@ -1314,7 +1298,10 @@ fn far_frame_never_prints_an_immediate_offset_above_32760() {
 /// A `mul` whose destination temp is `u32::MAX` (isel's own registers would not fit) is an internal error, not a panic.
 #[test]
 fn mul_into_the_largest_temp_is_an_internal_error() {
-    let insts = vec![constant(0, 1), binary(u32::MAX, BinOp::Mul, 0, 0)];
+    let insts = vec![
+        constant(0, 1),
+        binary(u32::MAX, BinOp::Mul(Sign::Signed), 0, 0),
+    ];
     assert_internal_error(&module_of(insts, Terminator::Return(None)));
 }
 
@@ -1390,7 +1377,11 @@ fn distance_in_bytes(text: &str, branch: &str, label: &str) -> i64 {
 fn add_then_fillers(fillers: u32) -> Module {
     let mut blocks = vec![block_of(
         0,
-        vec![constant(0, 1), constant(1, 1), binary(2, BinOp::Add, 0, 1)],
+        vec![
+            constant(0, 1),
+            constant(1, 1),
+            binary(2, BinOp::Add(Sign::Signed), 0, 1),
+        ],
         Terminator::Return(None),
     )];
     blocks.extend(unreachable_blocks(1, fillers));
@@ -1520,7 +1511,7 @@ fn relaxed_module_output_is_deterministic() {
     let module = far_panic_module(vec![
         constant(0, 7),
         constant(1, 0),
-        binary(2, BinOp::Div, 0, 1),
+        binary(2, BinOp::Div(Sign::Signed), 0, 1),
     ]);
     assert_eq!(emit_ok(&module, FILE), emit_ok(&module, FILE));
 }
@@ -1640,7 +1631,11 @@ fn overflow_check_one_instruction_further_is_relaxed() {
 /// A far multiplication check inverts `b.ne` to `b.eq`.
 #[test]
 fn far_mul_check_is_inverted_to_eq() {
-    let insts = vec![constant(0, 3), constant(1, 4), binary(2, BinOp::Mul, 0, 1)];
+    let insts = vec![
+        constant(0, 3),
+        constant(1, 4),
+        binary(2, BinOp::Mul(Sign::Signed), 0, 1),
+    ];
     let text = emit_ok(&far_panic_module(insts), FILE);
     assert_run(
         &text,
@@ -1677,7 +1672,11 @@ fn far_neg_check_is_inverted_to_vc() {
 /// A far division-by-zero check inverts `b.eq` to `b.ne`; the next `ok` branch stays short.
 #[test]
 fn far_div_zero_check_is_inverted_to_ne() {
-    let insts = vec![constant(0, 7), constant(1, 2), binary(2, BinOp::Div, 0, 1)];
+    let insts = vec![
+        constant(0, 7),
+        constant(1, 2),
+        binary(2, BinOp::Div(Sign::Signed), 0, 1),
+    ];
     let text = emit_ok(&far_panic_module(insts), FILE);
     assert_run(
         &text,
@@ -1696,7 +1695,11 @@ fn far_div_zero_check_is_inverted_to_ne() {
 /// A far `MIN / -1` check inverts `b.eq` to `b.ne`; skip labels follow instruction order.
 #[test]
 fn far_div_min_check_is_inverted_to_ne() {
-    let insts = vec![constant(0, 7), constant(1, 2), binary(2, BinOp::Div, 0, 1)];
+    let insts = vec![
+        constant(0, 7),
+        constant(1, 2),
+        binary(2, BinOp::Div(Sign::Signed), 0, 1),
+    ];
     let text = emit_ok(&far_panic_module(insts), FILE);
     assert_run(
         &text,
@@ -1713,7 +1716,11 @@ fn far_div_min_check_is_inverted_to_ne() {
 /// Relaxation keeps the `ok` label and the panic labels where isel put them.
 #[test]
 fn relaxation_keeps_isel_labels() {
-    let insts = vec![constant(0, 7), constant(1, 2), binary(2, BinOp::Div, 0, 1)];
+    let insts = vec![
+        constant(0, 7),
+        constant(1, 2),
+        binary(2, BinOp::Div(Sign::Signed), 0, 1),
+    ];
     let text = emit_ok(&far_panic_module(insts), FILE);
     for label in ["Lmain_panic0:", "Lmain_ok1:", "Lmain_panic2:"] {
         assert_eq!(count_lines(&text, label), 1, "{label}");

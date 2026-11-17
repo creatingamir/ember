@@ -5,7 +5,10 @@
 
 use std::collections::HashSet;
 
-use ir::{BinOp, BlockId, Function, Inst, Loc, Module, PrintKind, SlotId, Temp, Terminator, lower};
+use ir::{
+    BinOp, BlockId, Function, Inst, IrType, Loc, Module, Param, PrintKind, Sign, SlotId, Temp,
+    Terminator, lower,
+};
 use source::SourceFile;
 
 /// Joins lines into one text that ends with a newline.
@@ -111,7 +114,19 @@ fn params_are_the_first_slots_in_order() {
         "}",
     ]);
     let f = function(&lowered, "f");
-    assert_eq!(f.params, vec![SlotId(0), SlotId(1)]);
+    let expected = vec![
+        Param {
+            slot: SlotId(0),
+            ty: IrType::I64,
+            sign: Sign::Signed,
+        },
+        Param {
+            slot: SlotId(1),
+            ty: IrType::I64,
+            sign: Sign::Signed,
+        },
+    ];
+    assert_eq!(f.params, expected);
     assert_eq!(slot_names(f), vec!["a", "b", "x"]);
 }
 
@@ -123,9 +138,9 @@ fn function_without_parameters_has_no_params() {
     assert!(main.slots.is_empty());
 }
 
-/// `returns_value` is true for `i64` and `bool` return types.
+/// `ret` is the IR type of the result: `i64` for `i64` and `i8` for `bool`.
 #[test]
-fn returns_value_is_true_for_value_returning_functions() {
+fn ret_is_the_return_type_for_value_returning_functions() {
     let lowered = module(&[
         "fn number() -> i64 {",
         "    return 1",
@@ -136,15 +151,15 @@ fn returns_value_is_true_for_value_returning_functions() {
         "fn main() {",
         "}",
     ]);
-    assert!(function(&lowered, "number").returns_value);
-    assert!(function(&lowered, "flag").returns_value);
+    assert_eq!(function(&lowered, "number").ret, Some(IrType::I64));
+    assert_eq!(function(&lowered, "flag").ret, Some(IrType::I8));
 }
 
-/// `returns_value` is false when there is no return type.
+/// `ret` is `None` when there is no return type.
 #[test]
-fn returns_value_is_false_without_a_return_type() {
+fn ret_is_none_without_a_return_type() {
     let main = main_function(&["fn main() {", "}"]);
-    assert!(!main.returns_value);
+    assert_eq!(main.ret, None);
 }
 
 /// Hidden slots are named `$end`, `$and` and `$or`, and duplicates are allowed.
@@ -372,7 +387,7 @@ fn binary_instruction_has_operands_and_location() {
         },
         Inst::Binary {
             dst: Temp(2),
-            op: BinOp::Add,
+            op: BinOp::Add(Sign::Signed),
             lhs: Temp(0),
             rhs: Temp(1),
             loc: Loc { line: 2, col: 11 },
@@ -424,6 +439,7 @@ fn store_and_load_use_the_slot_id() {
         Inst::Load {
             dst: Temp(1),
             slot: SlotId(0),
+            sign: Sign::Signed,
         },
         Inst::Print {
             src: Temp(1),
@@ -507,4 +523,237 @@ fn id_types_are_ordered_and_hashable() {
     assert!(BlockId(1) < BlockId(2));
     let temps: HashSet<Temp> = [Temp(1), Temp(1), Temp(2)].into_iter().collect();
     assert_eq!(temps.len(), 2);
+}
+
+/// Every temp a function mentions has an entry in `temp_types`, and there are no spare entries.
+#[test]
+fn temp_types_has_one_entry_per_temp() {
+    let lowered = module(&[
+        "fn fib(n: i64) -> i64 {",
+        "    if n < 2 {",
+        "        return n",
+        "    }",
+        "    return fib(n - 1) + fib(n - 2)",
+        "}",
+        "fn main() {",
+        "    print(fib(10))",
+        "}",
+    ]);
+    let fib = function(&lowered, "fib");
+    let mut defined = 0;
+    for block in &fib.blocks {
+        for inst in &block.insts {
+            match inst {
+                Inst::Const { .. }
+                | Inst::Load { .. }
+                | Inst::Binary { .. }
+                | Inst::Neg { .. }
+                | Inst::Not { .. }
+                | Inst::Call { dst: Some(_), .. } => defined += 1,
+                Inst::Call { dst: None, .. } | Inst::Store { .. } | Inst::Print { .. } => {}
+            }
+        }
+    }
+    assert_eq!(fib.temp_types.len(), defined);
+    assert_eq!(fib.temp_types.len(), 13);
+}
+
+/// Integer temps are `i64`; comparison, `!`, `&&` and `||` results and bool literals are `i8`.
+#[test]
+fn temp_types_follow_the_value_kinds() {
+    let main = main_function(&[
+        "fn main() {",
+        "    a := 1",
+        "    print(a < 2)",
+        "    print(!true)",
+        "}",
+    ]);
+    // t0 const 1, t1 load a, t2 const 2, t3 lt, t4 const 1 (true), t5 not.
+    let expected = vec![
+        IrType::I64,
+        IrType::I64,
+        IrType::I64,
+        IrType::I8,
+        IrType::I8,
+        IrType::I8,
+    ];
+    assert_eq!(main.temp_types, expected);
+}
+
+/// In a range loop the constants and the step are `i64` and the comparison result is `i8`; `$end` is 8 bytes.
+#[test]
+fn range_loop_temps_and_slots_are_typed() {
+    let main = main_function(&[
+        "fn main() {",
+        "    for i in 0..3 {",
+        "        print(i)",
+        "    }",
+        "}",
+    ]);
+    for block in &main.blocks {
+        for inst in &block.insts {
+            match inst {
+                Inst::Const { dst, .. } => assert_eq!(main.temp_types[dst.0 as usize], IrType::I64),
+                Inst::Binary {
+                    dst,
+                    op: BinOp::Add(_),
+                    ..
+                } => assert_eq!(main.temp_types[dst.0 as usize], IrType::I64),
+                Inst::Binary { dst, .. } => {
+                    assert_eq!(main.temp_types[dst.0 as usize], IrType::I8)
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(slot_names(&main), vec!["i", "$end"]);
+    assert_eq!(main.slots[1].size, 8);
+}
+
+/// A `bool` parameter is an unsigned `i8`.
+#[test]
+fn bool_parameter_is_an_unsigned_i8() {
+    let lowered = module(&[
+        "fn f(a: i64, flag: bool) -> bool {",
+        "    return flag",
+        "}",
+        "fn main() {",
+        "}",
+    ]);
+    let f = function(&lowered, "f");
+    assert_eq!(f.params[0].ty, IrType::I64);
+    assert_eq!(f.params[0].sign, Sign::Signed);
+    assert_eq!(f.params[1].ty, IrType::I8);
+    assert_eq!(f.params[1].sign, Sign::Unsigned);
+}
+
+/// An `i64` slot is 8 bytes aligned to 8; a `bool` slot is 1 byte aligned to 1.
+#[test]
+fn slot_sizes_follow_the_variable_types() {
+    let main = main_function(&[
+        "fn main() {",
+        "    n := 1",
+        "    flag := true",
+        "    print(n)",
+        "    print(flag)",
+        "}",
+    ]);
+    let sizes: Vec<(u32, u32)> = main.slots.iter().map(|s| (s.size, s.align)).collect();
+    assert_eq!(sizes, vec![(8, 8), (1, 1)]);
+}
+
+/// The hidden slots: `$end` is 8 bytes, `$and` and `$or` are 1 byte.
+#[test]
+fn hidden_slot_sizes() {
+    let main = main_function(&[
+        "fn main() {",
+        "    a := true",
+        "    for i in 0..2 {",
+        "        print(a && a)",
+        "        print(a || a)",
+        "    }",
+        "}",
+    ]);
+    let sizes: Vec<(&str, u32)> = main
+        .slots
+        .iter()
+        .map(|slot| (slot.name.as_str(), slot.size))
+        .collect();
+    let expected = vec![("a", 1), ("i", 8), ("$end", 8), ("$and", 1), ("$or", 1)];
+    assert_eq!(sizes, expected);
+}
+
+/// A slot's alignment equals its size.
+#[test]
+fn slot_alignment_equals_size() {
+    let main = main_function(&[
+        "fn main() {",
+        "    a := true",
+        "    n := 5",
+        "    print(a)",
+        "    print(n)",
+        "}",
+    ]);
+    for slot in &main.slots {
+        assert_eq!(slot.align, slot.size, "{}", slot.name);
+    }
+}
+
+/// Loads of `i64` variables are signed and loads of `bool` variables are unsigned.
+#[test]
+fn loads_carry_the_sign_of_their_type() {
+    let main = main_function(&[
+        "fn main() {",
+        "    n := 1",
+        "    flag := true",
+        "    print(n)",
+        "    print(flag)",
+        "}",
+    ]);
+    let signs: Vec<(SlotId, Sign)> = main.blocks[0]
+        .insts
+        .iter()
+        .filter_map(|inst| match inst {
+            Inst::Load { slot, sign, .. } => Some((*slot, *sign)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        signs,
+        vec![(SlotId(0), Sign::Signed), (SlotId(1), Sign::Unsigned)]
+    );
+}
+
+/// Arithmetic and comparison operations on `i64` are `Signed`.
+#[test]
+fn i64_operations_are_signed() {
+    let main = main_function(&[
+        "fn main() {",
+        "    a := 6",
+        "    b := 3",
+        "    print(a + b)",
+        "    print(a - b)",
+        "    print(a * b)",
+        "    print(a / b)",
+        "    print(a % b)",
+        "    print(a < b)",
+        "    print(a <= b)",
+        "    print(a > b)",
+        "    print(a >= b)",
+        "    print(a == b)",
+        "    print(a != b)",
+        "}",
+    ]);
+    let ops: Vec<BinOp> = main.blocks[0]
+        .insts
+        .iter()
+        .filter_map(|inst| match inst {
+            Inst::Binary { op, .. } => Some(*op),
+            _ => None,
+        })
+        .collect();
+    let signed = Sign::Signed;
+    let expected = vec![
+        BinOp::Add(signed),
+        BinOp::Sub(signed),
+        BinOp::Mul(signed),
+        BinOp::Div(signed),
+        BinOp::Rem(signed),
+        BinOp::Lt(signed),
+        BinOp::Le(signed),
+        BinOp::Gt(signed),
+        BinOp::Ge(signed),
+        BinOp::Eq,
+        BinOp::Ne,
+    ];
+    assert_eq!(ops, expected);
+}
+
+/// The function's span is its name's span.
+#[test]
+fn function_span_covers_the_name() {
+    let src = text(&["fn alpha() {", "}", "fn main() {", "}"]);
+    let lowered = module(&["fn alpha() {", "}", "fn main() {", "}"]);
+    let alpha = function(&lowered, "alpha");
+    assert_eq!(&src[alpha.span.start..alpha.span.end], "alpha");
 }

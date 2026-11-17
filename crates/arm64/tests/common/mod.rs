@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ir::{BinOp, Block, BlockId, Function, Inst, Loc, Temp, Terminator};
+use ir::{BinOp, Block, BlockId, Function, Inst, IrType, Loc, Param, Sign, Temp, Terminator};
 use source::{SourceFile, Span};
 
 /// The file name every test program is compiled under; it shows up in panic messages.
@@ -200,8 +200,9 @@ pub fn main_module(blocks: Vec<Block>) -> ir::Module {
         functions: vec![Function {
             name: "main".to_string(),
             params: vec![],
-            returns_value: false,
+            ret: None,
             slots: vec![],
+            temp_types: i64_temp_types(&blocks),
             blocks,
             span: Span::new(0, 0),
         }],
@@ -252,14 +253,68 @@ pub fn ir_function(
 ) -> Function {
     Function {
         name: name.to_string(),
-        params: (0..param_count).map(ir::SlotId).collect(),
-        returns_value,
+        params: (0..param_count).map(i64_param).collect(),
+        ret: returns_value.then_some(IrType::I64),
         slots: (0..slot_count)
-            .map(|number| ir::Slot {
-                name: format!("s{number}"),
-            })
+            .map(|number| i64_slot(format!("s{number}")))
             .collect(),
+        temp_types: i64_temp_types(&blocks),
         blocks,
         span: Span::new(0, 0),
     }
+}
+
+/// A parameter stored in `slot`: a signed `i64`.
+pub fn i64_param(slot: u32) -> Param {
+    Param {
+        slot: ir::SlotId(slot),
+        ty: IrType::I64,
+        sign: Sign::Signed,
+    }
+}
+
+/// An 8-byte, 8-aligned slot, the size of every Phase 1 variable.
+pub fn i64_slot(name: String) -> ir::Slot {
+    ir::Slot {
+        name,
+        size: 8,
+        align: 8,
+    }
+}
+
+/// The most temps `i64_temp_types` lists; tests that name a temp near `u32::MAX` must not allocate billions.
+const MAX_LISTED_TEMPS: u32 = 1 << 20;
+
+/// One `i64` entry for every temp the blocks mention (up to `MAX_LISTED_TEMPS`), in temp order.
+pub fn i64_temp_types(blocks: &[Block]) -> Vec<IrType> {
+    let mut highest: Option<u32> = None;
+    let mut note = |temp: &Temp| highest = highest.max(Some(temp.0));
+    for block in blocks {
+        for inst in &block.insts {
+            match inst {
+                Inst::Const { dst, .. } => note(dst),
+                Inst::Load { dst, .. } => note(dst),
+                Inst::Store { src, .. } => note(src),
+                Inst::Binary { dst, lhs, rhs, .. } => {
+                    [dst, lhs, rhs].into_iter().for_each(&mut note)
+                }
+                Inst::Neg { dst, src, .. } | Inst::Not { dst, src } => {
+                    note(dst);
+                    note(src);
+                }
+                Inst::Call { dst, args, .. } => {
+                    dst.iter().for_each(&mut note);
+                    args.iter().for_each(&mut note);
+                }
+                Inst::Print { src, .. } => note(src),
+            }
+        }
+        match &block.term {
+            Terminator::Branch { cond, .. } => note(cond),
+            Terminator::Return(Some(temp)) => note(temp),
+            Terminator::Jump(_) | Terminator::Return(None) | Terminator::Unreachable => {}
+        }
+    }
+    let count = highest.map_or(0, |last| last.saturating_add(1).min(MAX_LISTED_TEMPS));
+    vec![IrType::I64; count as usize]
 }

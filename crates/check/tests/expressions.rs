@@ -7,7 +7,7 @@ mod common;
 
 use std::collections::HashMap;
 
-use check::{Binding, Signature, Type};
+use check::{Binding, Signature, TypeId};
 use common::{assert_single_error, checked, error, errors, fixture, main_with};
 use source::Span;
 
@@ -53,7 +53,7 @@ fn integer_literal_above_i64_max_is_rejected() {
 #[test]
 fn negated_i64_min_literal_is_accepted() {
     let fixture = fixture(&binding_expr("-9223372036854775808"));
-    assert_eq!(fixture.expr_type("-9223372036854775808", 0), Type::I64);
+    assert_eq!(fixture.expr_type("-9223372036854775808", 0), TypeId::I64);
 }
 
 /// Negating a literal beyond `i64::MIN` is an error at the literal, not the negation.
@@ -466,12 +466,13 @@ fn main() {
 
 // ---------------------------------------------------------------- results of a successful check
 
-/// Types display as they are written in source, and `()` for no value.
+/// Types are named as they are written in source, and `()` for no value.
 #[test]
-fn types_display_as_in_source() {
-    assert_eq!(Type::I64.to_string(), "i64");
-    assert_eq!(Type::Bool.to_string(), "bool");
-    assert_eq!(Type::Unit.to_string(), "()");
+fn types_are_named_as_in_source() {
+    let types = checked("fn main() {\n}\n").types;
+    assert_eq!(types.name(TypeId::I64), "i64");
+    assert_eq!(types.name(TypeId::BOOL), "bool");
+    assert_eq!(types.name(TypeId::UNIT), "()");
 }
 
 /// Literals, names, operators and comparisons get their types.
@@ -485,15 +486,15 @@ fn expression_types_of_operators() {
     print(!flag)
     print(count == 5 && true)";
     let fixture = fixture(&main_with(body));
-    assert_eq!(fixture.expr_type("1 + 2", 0), Type::I64);
-    assert_eq!(fixture.expr_type("1", 0), Type::I64);
-    assert_eq!(fixture.expr_type("count < 3", 0), Type::Bool);
-    assert_eq!(fixture.expr_type("count", 1), Type::I64);
-    assert_eq!(fixture.expr_type("flag", 1), Type::Bool);
-    assert_eq!(fixture.expr_type("-count", 0), Type::I64);
-    assert_eq!(fixture.expr_type("!flag", 0), Type::Bool);
-    assert_eq!(fixture.expr_type("count == 5 && true", 0), Type::Bool);
-    assert_eq!(fixture.expr_type("true", 0), Type::Bool);
+    assert_eq!(fixture.expr_type("1 + 2", 0), TypeId::I64);
+    assert_eq!(fixture.expr_type("1", 0), TypeId::I64);
+    assert_eq!(fixture.expr_type("count < 3", 0), TypeId::BOOL);
+    assert_eq!(fixture.expr_type("count", 1), TypeId::I64);
+    assert_eq!(fixture.expr_type("flag", 1), TypeId::BOOL);
+    assert_eq!(fixture.expr_type("-count", 0), TypeId::I64);
+    assert_eq!(fixture.expr_type("!flag", 0), TypeId::BOOL);
+    assert_eq!(fixture.expr_type("count == 5 && true", 0), TypeId::BOOL);
+    assert_eq!(fixture.expr_type("true", 0), TypeId::BOOL);
 }
 
 /// A call has the return type of the function, `()` when there is none, and `print` is `()`.
@@ -515,10 +516,10 @@ fn main() {
 }
 ";
     let fixture = fixture(src);
-    assert_eq!(fixture.expr_type("number()", 1), Type::I64);
-    assert_eq!(fixture.expr_type("truth()", 1), Type::Bool);
-    assert_eq!(fixture.expr_type("quiet()", 1), Type::Unit);
-    assert_eq!(fixture.expr_type("print(number())", 0), Type::Unit);
+    assert_eq!(fixture.expr_type("number()", 1), TypeId::I64);
+    assert_eq!(fixture.expr_type("truth()", 1), TypeId::BOOL);
+    assert_eq!(fixture.expr_type("quiet()", 1), TypeId::UNIT);
+    assert_eq!(fixture.expr_type("print(number())", 0), TypeId::UNIT);
 }
 
 /// Every expression of a program gets a type.
@@ -653,11 +654,11 @@ fn main() {
 ";
     let fixture = fixture(src);
     let local_types = &fixture.checked.local_types;
-    assert_eq!(local_types[&fixture.param("val")], Type::I64);
-    assert_eq!(local_types[&fixture.param("flag")], Type::Bool);
-    assert_eq!(local_types[&fixture.stmt("count := val", 0)], Type::I64);
-    assert_eq!(local_types[&fixture.stmt("other: bool", 0)], Type::Bool);
-    assert_eq!(local_types[&fixture.stmt("for idx", 0)], Type::I64);
+    assert_eq!(local_types[&fixture.param("val")], TypeId::I64);
+    assert_eq!(local_types[&fixture.param("flag")], TypeId::BOOL);
+    assert_eq!(local_types[&fixture.stmt("count := val", 0)], TypeId::I64);
+    assert_eq!(local_types[&fixture.stmt("other: bool", 0)], TypeId::BOOL);
+    assert_eq!(local_types[&fixture.stmt("for idx", 0)], TypeId::I64);
 }
 
 /// Signatures list every user function with parameter types and return type.
@@ -679,29 +680,29 @@ fn main() {
         (
             "both".to_string(),
             Signature {
-                params: vec![Type::I64, Type::Bool],
-                ret: Type::I64,
+                params: vec![TypeId::I64, TypeId::BOOL],
+                ret: TypeId::I64,
             },
         ),
         (
             "truth".to_string(),
             Signature {
                 params: vec![],
-                ret: Type::Bool,
+                ret: TypeId::BOOL,
             },
         ),
         (
             "quiet".to_string(),
             Signature {
-                params: vec![Type::I64],
-                ret: Type::Unit,
+                params: vec![TypeId::I64],
+                ret: TypeId::UNIT,
             },
         ),
         (
             "main".to_string(),
             Signature {
                 params: vec![],
-                ret: Type::Unit,
+                ret: TypeId::UNIT,
             },
         ),
     ]);

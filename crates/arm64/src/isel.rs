@@ -1,6 +1,6 @@
 //! Instruction selection: turns an IR function into MIR over virtual registers.
 
-use ir::{BinOp, BlockId, Function, Inst, Loc, PrintKind, SlotId, Temp, Terminator};
+use ir::{BinOp, BlockId, Function, Inst, Loc, PrintKind, Sign, SlotId, Temp, Terminator};
 use source::Diagnostic;
 
 use crate::mir::{Cond, MFunction, MInst, Mem, Reg, VReg, internal_error};
@@ -87,8 +87,8 @@ impl<'a> Selector<'a> {
     /// Selects the whole function: prologue, parameter stores, blocks and panic paths.
     fn select_function(&mut self) -> Result<(), Diagnostic> {
         self.insts.push(MInst::Prologue);
-        for (index, slot) in self.function.params.iter().enumerate() {
-            let mem = self.slot(*slot)?;
+        for (index, param) in self.function.params.iter().enumerate() {
+            let mem = self.slot(param.slot)?;
             if index < MAX_REGISTER_ARGS {
                 self.insts.push(MInst::Store {
                     src: Reg::phys(index as u8),
@@ -161,7 +161,7 @@ impl<'a> Selector<'a> {
                     value: *value as u64,
                 });
             }
-            Inst::Load { dst, slot } => {
+            Inst::Load { dst, slot, .. } => {
                 let mem = self.slot(*slot)?;
                 self.insts.push(MInst::Load {
                     dst: virt(*dst),
@@ -224,23 +224,34 @@ impl<'a> Selector<'a> {
         loc: Loc,
     ) -> Result<(), Diagnostic> {
         match op {
-            BinOp::Add => {
+            BinOp::Add(Sign::Signed) => {
                 self.insts.push(MInst::Adds { dst, lhs, rhs });
                 self.branch_to_panic(Cond::Vs, PanicReason::Overflow, loc);
             }
-            BinOp::Sub => {
+            BinOp::Sub(Sign::Signed) => {
                 self.insts.push(MInst::Subs { dst, lhs, rhs });
                 self.branch_to_panic(Cond::Vs, PanicReason::Overflow, loc);
             }
-            BinOp::Mul => self.select_mul(dst, lhs, rhs, loc)?,
-            BinOp::Div => self.select_div(dst, lhs, rhs, loc, false)?,
-            BinOp::Rem => self.select_div(dst, lhs, rhs, loc, true)?,
+            BinOp::Mul(Sign::Signed) => self.select_mul(dst, lhs, rhs, loc)?,
+            BinOp::Div(Sign::Signed) => self.select_div(dst, lhs, rhs, loc, false)?,
+            BinOp::Rem(Sign::Signed) => self.select_div(dst, lhs, rhs, loc, true)?,
             BinOp::Eq => self.select_compare(dst, lhs, rhs, Cond::Eq),
             BinOp::Ne => self.select_compare(dst, lhs, rhs, Cond::Ne),
-            BinOp::Lt => self.select_compare(dst, lhs, rhs, Cond::Lt),
-            BinOp::Le => self.select_compare(dst, lhs, rhs, Cond::Le),
-            BinOp::Gt => self.select_compare(dst, lhs, rhs, Cond::Gt),
-            BinOp::Ge => self.select_compare(dst, lhs, rhs, Cond::Ge),
+            BinOp::Lt(Sign::Signed) => self.select_compare(dst, lhs, rhs, Cond::Lt),
+            BinOp::Le(Sign::Signed) => self.select_compare(dst, lhs, rhs, Cond::Le),
+            BinOp::Gt(Sign::Signed) => self.select_compare(dst, lhs, rhs, Cond::Gt),
+            BinOp::Ge(Sign::Signed) => self.select_compare(dst, lhs, rhs, Cond::Ge),
+            BinOp::Add(Sign::Unsigned)
+            | BinOp::Sub(Sign::Unsigned)
+            | BinOp::Mul(Sign::Unsigned)
+            | BinOp::Div(Sign::Unsigned)
+            | BinOp::Rem(Sign::Unsigned)
+            | BinOp::Lt(Sign::Unsigned)
+            | BinOp::Le(Sign::Unsigned)
+            | BinOp::Gt(Sign::Unsigned)
+            | BinOp::Ge(Sign::Unsigned) => {
+                return Err(internal_error("unsigned operations are not supported yet"));
+            }
         }
         Ok(())
     }

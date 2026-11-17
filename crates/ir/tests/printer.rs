@@ -4,8 +4,8 @@
 #![allow(clippy::unwrap_used)]
 
 use ir::{
-    BinOp, Block, BlockId, Function, Inst, Loc, Module, PrintKind, Slot, SlotId, Temp, Terminator,
-    print_module,
+    BinOp, Block, BlockId, Function, Inst, IrType, Loc, Module, Param, PrintKind, Sign, Slot,
+    SlotId, Temp, Terminator, print_module,
 };
 use source::Span;
 
@@ -35,7 +35,10 @@ fn block(id: u32, insts: Vec<Inst>, term: Terminator) -> Block {
     }
 }
 
-/// Builds a function from parameter slot numbers, slot names and blocks.
+/// How many temps the default helpers give a type to; no test names a higher one.
+const LISTED_TEMPS: usize = 64;
+
+/// Builds a function with every parameter, slot and temp of type `i64`, from parameter slot numbers, slot names and blocks.
 fn function(
     name: &str,
     params: &[u32],
@@ -45,17 +48,57 @@ fn function(
 ) -> Function {
     Function {
         name: name.to_string(),
-        params: params.iter().map(|&number| SlotId(number)).collect(),
-        returns_value,
-        slots: slots
+        params: params
             .iter()
-            .map(|name| Slot {
-                name: name.to_string(),
+            .map(|&number| Param {
+                slot: SlotId(number),
+                ty: IrType::I64,
+                sign: Sign::Signed,
             })
             .collect(),
+        ret: returns_value.then_some(IrType::I64),
+        slots: slots.iter().map(|name| slot(name, 8)).collect(),
+        temp_types: vec![IrType::I64; LISTED_TEMPS],
         blocks,
         span: Span::new(0, 0),
     }
+}
+
+/// Builds a slot of `size` bytes, aligned to its size.
+fn slot(name: &str, size: u32) -> Slot {
+    Slot {
+        name: name.to_string(),
+        size,
+        align: size,
+    }
+}
+
+/// Builds a `main` with the given parameters, slots and temp types whose only block holds `insts` and returns.
+fn typed_main(
+    params: Vec<Param>,
+    slots: Vec<Slot>,
+    temp_types: Vec<IrType>,
+    insts: Vec<Inst>,
+) -> Function {
+    Function {
+        name: "main".to_string(),
+        params,
+        ret: None,
+        slots,
+        temp_types,
+        blocks: vec![block(0, insts, Terminator::Return(None))],
+        span: Span::new(0, 0),
+    }
+}
+
+/// Prints `typed_main` with the given parts.
+fn print_typed(
+    params: Vec<Param>,
+    slots: Vec<Slot>,
+    temp_types: Vec<IrType>,
+    insts: Vec<Inst>,
+) -> String {
+    print_function(typed_main(params, slots, temp_types, insts))
 }
 
 /// Prints a module holding one function.
@@ -85,7 +128,7 @@ fn main_text(block_lines: &[&str]) -> String {
     text(&lines)
 }
 
-/// Builds a binary instruction `t2 = OP t0, t1` with a location.
+/// Builds a binary instruction `t2 = OP t0, t1` with the location 3:7.
 fn binary(op: BinOp) -> Inst {
     Inst::Binary {
         dst: t(2),
@@ -120,8 +163,8 @@ fn header_with_params_and_value() {
         vec![block(0, vec![], Terminator::Return(None))],
     ));
     let expected = text(&[
-        "fn f(a, b) -> i64 {",
-        "  slots: a, b, c",
+        "fn f(a:i64, b:i64) -> i64 {",
+        "  slots: a:8, b:8, c:8",
         "bb0:",
         "  ret",
         "}",
@@ -140,7 +183,7 @@ fn empty_slots_line_has_nothing_after_the_colon() {
 #[test]
 fn slots_print_comma_separated() {
     let output = print_insts(&["a", "b", "$end"], vec![]);
-    assert_eq!(output.lines().nth(1).unwrap(), "  slots: a, b, $end");
+    assert_eq!(output.lines().nth(1).unwrap(), "  slots: a:8, b:8, $end:8");
 }
 
 /// The second slot with a name gets `#k` where k is its slot number, in slots, loads and stores.
@@ -158,16 +201,17 @@ fn duplicate_slot_names_get_their_slot_number() {
         Inst::Load {
             dst: t(1),
             slot: SlotId(3),
+            sign: Sign::Signed,
         },
     ];
     let output = print_insts(&["a", "$end", "b", "$end"], insts);
     let expected = text(&[
         "fn main() {",
-        "  slots: a, $end, b, $end#3",
+        "  slots: a:8, $end:8, b:8, $end#3:8",
         "bb0:",
         "  store $end, t0",
         "  store $end#3, t0",
-        "  t1 = load $end#3",
+        "  t1:i64 = load $end#3",
         "  ret",
         "}",
     ]);
@@ -178,7 +222,7 @@ fn duplicate_slot_names_get_their_slot_number() {
 #[test]
 fn a_name_used_three_times_numbers_the_later_slots() {
     let output = print_insts(&["x", "x", "x"], vec![]);
-    assert_eq!(output.lines().nth(1).unwrap(), "  slots: x, x#1, x#2");
+    assert_eq!(output.lines().nth(1).unwrap(), "  slots: x:8, x#1:8, x#2:8");
 }
 
 /// `const` prints its value, including negative values.
@@ -195,8 +239,8 @@ fn const_prints_its_value() {
         },
     ];
     let expected = main_text(&[
-        "  t0 = const 42",
-        "  t1 = const -9223372036854775808",
+        "  t0:i64 = const 42",
+        "  t1:i64 = const -9223372036854775808",
         "  ret",
     ]);
     assert_eq!(print_insts(&[], insts), expected);
@@ -209,6 +253,7 @@ fn load_and_store_print_the_slot_name() {
         Inst::Load {
             dst: t(0),
             slot: SlotId(0),
+            sign: Sign::Signed,
         },
         Inst::Store {
             slot: SlotId(0),
@@ -217,9 +262,9 @@ fn load_and_store_print_the_slot_name() {
     ];
     let expected = text(&[
         "fn main() {",
-        "  slots: x",
+        "  slots: x:8",
         "bb0:",
-        "  t0 = load x",
+        "  t0:i64 = load x",
         "  store x, t0",
         "  ret",
         "}",
@@ -231,14 +276,14 @@ fn load_and_store_print_the_slot_name() {
 #[test]
 fn checked_operators_print_a_location() {
     let table = [
-        (BinOp::Add, "add"),
-        (BinOp::Sub, "sub"),
-        (BinOp::Mul, "mul"),
-        (BinOp::Div, "div"),
-        (BinOp::Rem, "rem"),
+        (BinOp::Add(Sign::Signed), "add.s"),
+        (BinOp::Sub(Sign::Signed), "sub.s"),
+        (BinOp::Mul(Sign::Signed), "mul.s"),
+        (BinOp::Div(Sign::Signed), "div.s"),
+        (BinOp::Rem(Sign::Signed), "rem.s"),
     ];
     for (op, mnemonic) in table {
-        let line = format!("  t2 = {mnemonic} t0, t1 @3:7");
+        let line = format!("  t2:i64 = {mnemonic} t0, t1 @3:7");
         let expected = main_text(&[&line, "  ret"]);
         assert_eq!(print_insts(&[], vec![binary(op)]), expected, "{mnemonic}");
     }
@@ -250,15 +295,17 @@ fn comparison_operators_print_no_location() {
     let table = [
         (BinOp::Eq, "eq"),
         (BinOp::Ne, "ne"),
-        (BinOp::Lt, "lt"),
-        (BinOp::Le, "le"),
-        (BinOp::Gt, "gt"),
-        (BinOp::Ge, "ge"),
+        (BinOp::Lt(Sign::Signed), "lt.s"),
+        (BinOp::Le(Sign::Signed), "le.s"),
+        (BinOp::Gt(Sign::Signed), "gt.s"),
+        (BinOp::Ge(Sign::Signed), "ge.s"),
     ];
     for (op, mnemonic) in table {
-        let line = format!("  t2 = {mnemonic} t0, t1");
+        let line = format!("  t2:i8 = {mnemonic} t0, t1");
         let expected = main_text(&[&line, "  ret"]);
-        assert_eq!(print_insts(&[], vec![binary(op)]), expected, "{mnemonic}");
+        let types = vec![IrType::I64, IrType::I64, IrType::I8];
+        let output = print_typed(vec![], vec![], types, vec![binary(op)]);
+        assert_eq!(output, expected, "{mnemonic}");
     }
 }
 
@@ -270,7 +317,7 @@ fn neg_prints_a_location() {
         src: t(0),
         loc: loc(12, 34),
     }];
-    let expected = main_text(&["  t1 = neg t0 @12:34", "  ret"]);
+    let expected = main_text(&["  t1:i64 = neg t0 @12:34", "  ret"]);
     assert_eq!(print_insts(&[], insts), expected);
 }
 
@@ -281,8 +328,9 @@ fn not_prints_no_location() {
         dst: t(1),
         src: t(0),
     }];
-    let expected = main_text(&["  t1 = not t0", "  ret"]);
-    assert_eq!(print_insts(&[], insts), expected);
+    let expected = main_text(&["  t1:i8 = not t0", "  ret"]);
+    let output = print_typed(vec![], vec![], vec![IrType::I8, IrType::I8], insts);
+    assert_eq!(output, expected);
 }
 
 /// A call with a result and several arguments prints them comma-separated.
@@ -293,7 +341,7 @@ fn call_with_result_and_arguments() {
         func: "fib".to_string(),
         args: vec![t(0), t(1), t(2)],
     }];
-    let expected = main_text(&["  t3 = call fib(t0, t1, t2)", "  ret"]);
+    let expected = main_text(&["  t3:i64 = call fib(t0, t1, t2)", "  ret"]);
     assert_eq!(print_insts(&[], insts), expected);
 }
 
@@ -305,7 +353,7 @@ fn call_with_one_argument() {
         func: "f".to_string(),
         args: vec![t(0)],
     }];
-    let expected = main_text(&["  t1 = call f(t0)", "  ret"]);
+    let expected = main_text(&["  t1:i64 = call f(t0)", "  ret"]);
     assert_eq!(print_insts(&[], insts), expected);
 }
 
@@ -317,7 +365,7 @@ fn call_with_no_arguments() {
         func: "zero".to_string(),
         args: vec![],
     }];
-    let expected = main_text(&["  t0 = call zero()", "  ret"]);
+    let expected = main_text(&["  t0:i64 = call zero()", "  ret"]);
     assert_eq!(print_insts(&[], insts), expected);
 }
 
@@ -416,7 +464,7 @@ fn blocks_print_in_order_with_labels_at_column_zero() {
         "fn main() {",
         "  slots:",
         "bb0:",
-        "  t0 = const 1",
+        "  t0:i64 = const 1",
         "  jump bb1",
         "bb1:",
         "  print.i64 t0",
@@ -467,6 +515,7 @@ fn print_with_slots(names: &[String]) -> String {
     let insts = vec![Inst::Load {
         dst: t(0),
         slot: last,
+        sign: Sign::Signed,
     }];
     print_insts(&slot_names, insts)
 }
@@ -483,9 +532,13 @@ fn printing_thousands_of_slots_is_fast_and_numbers_duplicates() {
 
     let mut expected_names = names.clone();
     expected_names[3000] = "s5#3000".to_string();
-    let expected_slots_line = format!("  slots: {}", expected_names.join(", "));
+    let labels: Vec<String> = expected_names
+        .iter()
+        .map(|name| format!("{name}:8"))
+        .collect();
+    let expected_slots_line = format!("  slots: {}", labels.join(", "));
     assert_eq!(output.lines().nth(1).unwrap(), expected_slots_line);
-    assert!(output.contains("  t0 = load s5#3000\n"));
+    assert!(output.contains("  t0:i64 = load s5#3000\n"));
     assert!(
         elapsed < std::time::Duration::from_secs(1),
         "printing took {elapsed:?}"
@@ -502,10 +555,335 @@ fn printing_thousands_of_equal_names_is_fast() {
     let elapsed = started.elapsed();
 
     let slots_line = output.lines().nth(1).unwrap();
-    assert!(slots_line.starts_with("  slots: x, x#1, x#2, x#3,"));
-    assert!(slots_line.ends_with(", x#2999"));
+    assert!(slots_line.starts_with("  slots: x:8, x#1:8, x#2:8, x#3:8,"));
+    assert!(slots_line.ends_with(", x#2999:8"));
     assert!(
         elapsed < std::time::Duration::from_secs(1),
         "printing took {elapsed:?}"
     );
+}
+
+/// A temp with no entry in `temp_types` prints its type as `?`.
+#[test]
+fn temp_without_a_type_prints_a_question_mark() {
+    let insts = vec![Inst::Const {
+        dst: t(5),
+        value: 1,
+    }];
+    let output = print_typed(vec![], vec![], vec![IrType::I64; 5], insts);
+    assert_eq!(output, main_text(&["  t5:? = const 1", "  ret"]));
+}
+
+/// A temp with an entry prints that entry, not a default.
+#[test]
+fn temp_types_come_from_the_table() {
+    let insts = vec![
+        Inst::Const {
+            dst: t(0),
+            value: 1,
+        },
+        Inst::Const {
+            dst: t(1),
+            value: 2,
+        },
+        Inst::Const {
+            dst: t(2),
+            value: 3,
+        },
+        Inst::Const {
+            dst: t(3),
+            value: 4,
+        },
+    ];
+    let types = vec![IrType::I8, IrType::I16, IrType::I32, IrType::I64];
+    let expected = main_text(&[
+        "  t0:i8 = const 1",
+        "  t1:i16 = const 2",
+        "  t2:i32 = const 3",
+        "  t3:i64 = const 4",
+        "  ret",
+    ]);
+    assert_eq!(print_typed(vec![], vec![], types, insts), expected);
+}
+
+/// A load into an `i16` with a signed load prints `load.s`.
+#[test]
+fn signed_load_of_an_i16_prints_load_s() {
+    let insts = vec![Inst::Load {
+        dst: t(0),
+        slot: SlotId(0),
+        sign: Sign::Signed,
+    }];
+    let output = print_typed(vec![], vec![slot("small", 2)], vec![IrType::I16], insts);
+    let expected = text(&[
+        "fn main() {",
+        "  slots: small:2",
+        "bb0:",
+        "  t0:i16 = load.s small",
+        "  ret",
+        "}",
+    ]);
+    assert_eq!(output, expected);
+}
+
+/// A load into an `i8` with an unsigned load prints `load.u`.
+#[test]
+fn unsigned_load_of_an_i8_prints_load_u() {
+    let insts = vec![Inst::Load {
+        dst: t(0),
+        slot: SlotId(0),
+        sign: Sign::Unsigned,
+    }];
+    let output = print_typed(vec![], vec![slot("flag", 1)], vec![IrType::I8], insts);
+    assert!(output.contains("  t0:i8 = load.u flag\n"), "{output}");
+}
+
+/// A signed load of an `i8` prints `load.s`.
+#[test]
+fn signed_load_of_an_i8_prints_load_s() {
+    let insts = vec![Inst::Load {
+        dst: t(0),
+        slot: SlotId(0),
+        sign: Sign::Signed,
+    }];
+    let output = print_typed(vec![], vec![slot("byte", 1)], vec![IrType::I8], insts);
+    assert!(output.contains("  t0:i8 = load.s byte\n"), "{output}");
+}
+
+/// An unsigned load of an `i16` prints `load.u`.
+#[test]
+fn unsigned_load_of_an_i16_prints_load_u() {
+    let insts = vec![Inst::Load {
+        dst: t(0),
+        slot: SlotId(0),
+        sign: Sign::Unsigned,
+    }];
+    let output = print_typed(vec![], vec![slot("half", 2)], vec![IrType::I16], insts);
+    assert!(output.contains("  t0:i16 = load.u half\n"), "{output}");
+}
+
+/// Loads of `i32` and `i64` print no sign, whatever the instruction holds.
+#[test]
+fn wide_loads_print_no_sign() {
+    for (ty, size, sign) in [
+        (IrType::I32, 4, Sign::Signed),
+        (IrType::I32, 4, Sign::Unsigned),
+        (IrType::I64, 8, Sign::Signed),
+        (IrType::I64, 8, Sign::Unsigned),
+    ] {
+        let insts = vec![Inst::Load {
+            dst: t(0),
+            slot: SlotId(0),
+            sign,
+        }];
+        let output = print_typed(vec![], vec![slot("w", size)], vec![ty], insts);
+        let expected = format!("  t0:{ty} = load w\n");
+        assert!(output.contains(&expected), "{output}");
+    }
+}
+
+/// A constant of `-1` into an `i64` prints `const -1`.
+#[test]
+fn const_minus_one_prints_signed() {
+    let insts = vec![Inst::Const {
+        dst: t(0),
+        value: -1,
+    }];
+    let output = print_insts(&[], insts);
+    assert_eq!(output, main_text(&["  t0:i64 = const -1", "  ret"]));
+}
+
+/// A `u64` constant above `i64::MAX` is held as its two's-complement `i64` and prints negative.
+#[test]
+fn const_with_the_top_bit_set_prints_as_a_signed_number() {
+    let insts = vec![Inst::Const {
+        dst: t(0),
+        value: u64::MAX as i64,
+    }];
+    let output = print_insts(&[], insts);
+    assert_eq!(output, main_text(&["  t0:i64 = const -1", "  ret"]));
+}
+
+/// A parameter of `i8` with `Sign::Unsigned` prints `p:i8.u`, and the slot size is 1.
+#[test]
+fn unsigned_i8_parameter_prints_a_u_suffix() {
+    let param = Param {
+        slot: SlotId(0),
+        ty: IrType::I8,
+        sign: Sign::Unsigned,
+    };
+    let output = print_typed(vec![param], vec![slot("p", 1)], vec![], vec![]);
+    let expected = text(&["fn main(p:i8.u) {", "  slots: p:1", "bb0:", "  ret", "}"]);
+    assert_eq!(output, expected);
+}
+
+/// A signed `i16` parameter prints `.s`, an unsigned one `.u`.
+#[test]
+fn i16_parameters_print_their_sign() {
+    let params = vec![
+        Param {
+            slot: SlotId(0),
+            ty: IrType::I16,
+            sign: Sign::Signed,
+        },
+        Param {
+            slot: SlotId(1),
+            ty: IrType::I16,
+            sign: Sign::Unsigned,
+        },
+    ];
+    let slots = vec![slot("a", 2), slot("b", 2)];
+    let output = print_typed(params, slots, vec![], vec![]);
+    assert_eq!(
+        output.lines().next().unwrap(),
+        "fn main(a:i16.s, b:i16.u) {"
+    );
+}
+
+/// Parameters of `i32` and `i64` print no sign suffix.
+#[test]
+fn wide_parameters_print_no_sign() {
+    let params = vec![
+        Param {
+            slot: SlotId(0),
+            ty: IrType::I32,
+            sign: Sign::Unsigned,
+        },
+        Param {
+            slot: SlotId(1),
+            ty: IrType::I64,
+            sign: Sign::Unsigned,
+        },
+    ];
+    let slots = vec![slot("a", 4), slot("b", 8)];
+    let output = print_typed(params, slots, vec![], vec![]);
+    assert_eq!(output.lines().next().unwrap(), "fn main(a:i32, b:i64) {");
+}
+
+/// A return type other than `i64` prints after the arrow: `-> i8`.
+#[test]
+fn return_type_is_printed_after_the_arrow() {
+    for (ty, name) in [
+        (IrType::I8, "i8"),
+        (IrType::I16, "i16"),
+        (IrType::I32, "i32"),
+        (IrType::I64, "i64"),
+    ] {
+        let mut function = typed_main(vec![], vec![], vec![], vec![]);
+        function.ret = Some(ty);
+        let output = print_function(function);
+        assert_eq!(
+            output.lines().next().unwrap(),
+            format!("fn main() -> {name} {{")
+        );
+    }
+}
+
+/// Slots print their size in bytes after a colon.
+#[test]
+fn slots_print_their_size() {
+    let slots = vec![slot("a", 1), slot("b", 2), slot("c", 4), slot("d", 8)];
+    let output = print_typed(vec![], slots, vec![], vec![]);
+    assert_eq!(
+        output.lines().nth(1).unwrap(),
+        "  slots: a:1, b:2, c:4, d:8"
+    );
+}
+
+/// The alignment is not printed.
+#[test]
+fn slots_do_not_print_their_alignment() {
+    let wide_aligned = Slot {
+        name: "a".to_string(),
+        size: 4,
+        align: 16,
+    };
+    let output = print_typed(vec![], vec![wide_aligned], vec![], vec![]);
+    assert_eq!(output.lines().nth(1).unwrap(), "  slots: a:4");
+}
+
+/// Duplicate names get `#k` before the size: `x#1:2`.
+#[test]
+fn duplicate_slot_names_keep_the_size_after_the_number() {
+    let output = print_typed(vec![], vec![slot("x", 8), slot("x", 2)], vec![], vec![]);
+    assert_eq!(output.lines().nth(1).unwrap(), "  slots: x:8, x#1:2");
+}
+
+/// The unsigned operations print `.u`.
+#[test]
+fn unsigned_operators_print_a_u_suffix() {
+    let table = [
+        (BinOp::Add(Sign::Unsigned), "add.u"),
+        (BinOp::Sub(Sign::Unsigned), "sub.u"),
+        (BinOp::Mul(Sign::Unsigned), "mul.u"),
+        (BinOp::Div(Sign::Unsigned), "div.u"),
+        (BinOp::Rem(Sign::Unsigned), "rem.u"),
+    ];
+    for (op, mnemonic) in table {
+        let line = format!("  t2:i32 = {mnemonic} t0, t1 @3:7");
+        let types = vec![IrType::I32; 3];
+        let output = print_typed(vec![], vec![], types, vec![binary(op)]);
+        assert_eq!(output, main_text(&[&line, "  ret"]), "{mnemonic}");
+    }
+}
+
+/// The unsigned comparisons print `.u`.
+#[test]
+fn unsigned_comparisons_print_a_u_suffix() {
+    let table = [
+        (BinOp::Lt(Sign::Unsigned), "lt.u"),
+        (BinOp::Le(Sign::Unsigned), "le.u"),
+        (BinOp::Gt(Sign::Unsigned), "gt.u"),
+        (BinOp::Ge(Sign::Unsigned), "ge.u"),
+    ];
+    for (op, mnemonic) in table {
+        let line = format!("  t2:i8 = {mnemonic} t0, t1");
+        let types = vec![IrType::I32, IrType::I32, IrType::I8];
+        let output = print_typed(vec![], vec![], types, vec![binary(op)]);
+        assert_eq!(output, main_text(&[&line, "  ret"]), "{mnemonic}");
+    }
+}
+
+/// The same operation with the two signs prints two different mnemonics.
+#[test]
+fn signed_and_unsigned_mnemonics_differ() {
+    let signed = print_insts(&[], vec![binary(BinOp::Add(Sign::Signed))]);
+    let unsigned = print_insts(&[], vec![binary(BinOp::Add(Sign::Unsigned))]);
+    assert!(signed.contains("add.s"));
+    assert!(unsigned.contains("add.u"));
+}
+
+/// A call whose result is narrow prints the result type before the `=`.
+#[test]
+fn call_result_prints_its_temp_type() {
+    let insts = vec![Inst::Call {
+        dst: Some(t(0)),
+        func: "flag".to_string(),
+        args: vec![],
+    }];
+    let output = print_typed(vec![], vec![], vec![IrType::I8], insts);
+    assert_eq!(output, main_text(&["  t0:i8 = call flag()", "  ret"]));
+}
+
+/// A call without a result prints no type.
+#[test]
+fn call_without_a_result_prints_no_type() {
+    let insts = vec![Inst::Call {
+        dst: None,
+        func: "say".to_string(),
+        args: vec![t(0)],
+    }];
+    let output = print_typed(vec![], vec![], vec![IrType::I64], insts);
+    assert_eq!(output, main_text(&["  call say(t0)", "  ret"]));
+}
+
+/// Stores print no types: `store x, t0`.
+#[test]
+fn store_prints_no_type() {
+    let insts = vec![Inst::Store {
+        slot: SlotId(0),
+        src: t(0),
+    }];
+    let output = print_typed(vec![], vec![slot("x", 8)], vec![IrType::I64], insts);
+    assert!(output.contains("\n  store x, t0\n"), "{output}");
 }

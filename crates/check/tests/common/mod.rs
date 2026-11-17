@@ -6,7 +6,7 @@
 #![allow(dead_code)]
 
 use ast::{Block, ElseBranch, Expr, ExprKind, ForKind, NodeId, Param, Program, Stmt, StmtKind};
-use check::{Binding, Checked, Type, check};
+use check::{Binding, Checked, TypeId, check};
 use source::Span;
 
 /// Parses source text that must be valid Ember syntax.
@@ -185,7 +185,7 @@ impl Fixture {
     }
 
     /// Returns the type recorded for the expression at `needle`.
-    pub fn expr_type(&self, needle: &str, nth: usize) -> Type {
+    pub fn expr_type(&self, needle: &str, nth: usize) -> TypeId {
         self.checked.expr_types[&self.expr(needle, nth)]
     }
 
